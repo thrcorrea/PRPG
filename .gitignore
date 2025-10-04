@@ -1,0 +1,48 @@
+# Binários compilados
+pr-champion
+pr-champion-*
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Arquivos de configuração local
+.env
+.env.local
+
+# Logs
+*.log
+
+# Arquivos de cache do Go
+*.test
+*.prof
+*.out
+
+# Diretório de dependências do vendor
+vendor/
+
+# Cache de build do Go
+.cache/
+
+# Arquivos temporários
+*.tmp
+*.temp
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arquivos de output
+output/
+reports/
+
+# Arquivos de teste
+test_output/
