@@ -23,20 +23,25 @@ type Repository struct {
 
 // UserStats representa as estatísticas de um usuário
 type UserStats struct {
-	Username   string
-	PRsCount   int
-	WeeklyWins int
-	TotalScore int
-	RepoStats  map[string]int // PRs por repositório
+	Username          string
+	PRsCount          int
+	WeeklyWins        int
+	TotalScore        int
+	RepoStats         map[string]int // PRs por repositório
+	CommentsCount     int            // Total de comentários feitos pelo usuário
+	CommentWeeklyWins int            // Vitórias semanais por comentários
+	CommentScore      int            // Pontuação total por comentários
 }
 
 // WeeklyData representa os dados de uma semana específica
 type WeeklyData struct {
-	StartDate time.Time
-	EndDate   time.Time
-	UserPRs   map[string]int
-	Winner    string
-	RepoData  map[string]map[string]int // repo -> user -> PRs
+	StartDate     time.Time
+	EndDate       time.Time
+	UserPRs       map[string]int
+	Winner        string
+	RepoData      map[string]map[string]int // repo -> user -> PRs
+	UserComments  map[string]int            // comentários por usuário na semana
+	CommentWinner string                    // vencedor da semana por comentários
 }
 
 // PRChampion é a estrutura principal da aplicação
@@ -90,6 +95,11 @@ func (pc *PRChampion) FetchMergedPRs() error {
 	fmt.Printf("📊 Encontrados %d PRs mergeados no período total\n", len(allPRs))
 
 	pc.processWeeklyData(allPRs)
+
+	// Busca comentários para todos os PRs
+	if err := pc.fetchCommentsForPRs(allPRs); err != nil {
+		fmt.Printf("⚠️  Erro ao buscar comentários: %v\n", err)
+	}
 	pc.calculateUserStats()
 
 	return nil
@@ -144,6 +154,166 @@ func (pc *PRChampion) fetchPRsForRepo(repo Repository) ([]*github.PullRequest, e
 	return repoPRs, nil
 }
 
+// fetchCommentsForPRs busca comentários de todos os PRs
+func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
+	fmt.Printf("💬 Buscando comentários dos PRs...\n")
+
+	ctx := context.Background()
+	totalComments := 0
+
+	// Mapa para rastrear comentários por semana
+	weeklyComments := make(map[string]map[string]int) // weekKey -> username -> count
+	weekStarts := make(map[string]time.Time)
+
+	for _, pr := range prs {
+		repoOwner := pr.Base.Repo.Owner.GetLogin()
+		repoName := pr.Base.Repo.GetName()
+		prNumber := pr.GetNumber()
+
+		// Busca comentários do PR
+		opts := &github.IssueListCommentsOptions{
+			ListOptions: github.ListOptions{
+				PerPage: 100,
+			},
+		}
+
+		for {
+			comments, resp, err := pc.client.Issues.ListComments(ctx, repoOwner, repoName, prNumber, opts)
+			if err != nil {
+				fmt.Printf("  ⚠️  Erro ao buscar comentários do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
+				break
+			}
+
+			for _, comment := range comments {
+				commentTime := comment.CreatedAt.Time
+				// Verifica se o comentário foi feito no período analisado
+				if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
+					username := comment.User.GetLogin()
+
+					// Filtra usuários excluídos (bots, sonarqube, etc.)
+					if isExcludedUser(username) {
+						continue
+					}
+
+					// Determina a semana do comentário
+					weekStart := getWeekStart(commentTime)
+					weekKey := weekStart.Format("2006-01-02")
+
+					if weeklyComments[weekKey] == nil {
+						weeklyComments[weekKey] = make(map[string]int)
+						weekStarts[weekKey] = weekStart
+					}
+
+					weeklyComments[weekKey][username]++
+					totalComments++
+				}
+			}
+
+			if resp.NextPage == 0 {
+				break
+			}
+			opts.Page = resp.NextPage
+		}
+
+		// Busca review comments (comentários de revisão de código)
+		reviewOpts := &github.PullRequestListCommentsOptions{
+			ListOptions: github.ListOptions{
+				PerPage: 100,
+			},
+		}
+
+		for {
+			reviewComments, resp, err := pc.client.PullRequests.ListComments(ctx, repoOwner, repoName, prNumber, reviewOpts)
+			if err != nil {
+				fmt.Printf("  ⚠️  Erro ao buscar review comments do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
+				break
+			}
+
+			for _, comment := range reviewComments {
+				commentTime := comment.CreatedAt.Time
+				// Verifica se o comentário foi feito no período analisado
+				if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
+					username := comment.User.GetLogin()
+
+					// Filtra usuários excluídos (bots, sonarqube, etc.)
+					if isExcludedUser(username) {
+						continue
+					}
+
+					// Determina a semana do comentário
+					weekStart := getWeekStart(commentTime)
+					weekKey := weekStart.Format("2006-01-02")
+
+					if weeklyComments[weekKey] == nil {
+						weeklyComments[weekKey] = make(map[string]int)
+						weekStarts[weekKey] = weekStart
+					}
+
+					weeklyComments[weekKey][username]++
+					totalComments++
+				}
+			}
+
+			if resp.NextPage == 0 {
+				break
+			}
+			reviewOpts.Page = resp.NextPage
+		}
+	}
+
+	// Adiciona dados de comentários às semanas existentes
+	pc.processWeeklyComments(weeklyComments, weekStarts)
+
+	fmt.Printf("💬 Total de comentários encontrados no período: %d\n", totalComments)
+	return nil
+}
+
+// processWeeklyComments processa os comentários por semana e identifica vencedores
+func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string]int, weekStarts map[string]time.Time) {
+	// Adiciona dados de comentários às semanas existentes ou cria novas semanas
+	for weekKey, userComments := range weeklyComments {
+		weekStart := weekStarts[weekKey]
+
+		// Encontra o vencedor da semana por comentários
+		var commentWinner string
+		maxComments := 0
+		for user, count := range userComments {
+			if count > maxComments {
+				maxComments = count
+				commentWinner = user
+			}
+		}
+
+		// Procura se já existe uma semana correspondente
+		found := false
+		for i := range pc.weeklyData {
+			if pc.weeklyData[i].StartDate.Equal(weekStart) {
+				pc.weeklyData[i].UserComments = userComments
+				pc.weeklyData[i].CommentWinner = commentWinner
+				found = true
+				break
+			}
+		}
+
+		// Se não encontrou, cria uma nova entrada semanal apenas para comentários
+		if !found {
+			weekEnd := weekStart.Add(6 * 24 * time.Hour)
+			pc.weeklyData = append(pc.weeklyData, WeeklyData{
+				StartDate:     weekStart,
+				EndDate:       weekEnd,
+				UserPRs:       make(map[string]int),
+				UserComments:  userComments,
+				CommentWinner: commentWinner,
+			})
+		}
+	}
+
+	// Reordena por data
+	sort.Slice(pc.weeklyData, func(i, j int) bool {
+		return pc.weeklyData[i].StartDate.Before(pc.weeklyData[j].StartDate)
+	})
+}
+
 // processWeeklyData processa os PRs por semana
 func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 	// Agrupa PRs por semana
@@ -196,6 +366,7 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 // calculateUserStats calcula as estatísticas finais dos usuários
 func (pc *PRChampion) calculateUserStats() {
 	for _, week := range pc.weeklyData {
+		// Processa PRs
 		for username, prCount := range week.UserPRs {
 			if pc.userStats[username] == nil {
 				pc.userStats[username] = &UserStats{
@@ -211,6 +382,27 @@ func (pc *PRChampion) calculateUserStats() {
 				stats.WeeklyWins++
 				stats.TotalScore++
 			}
+		}
+
+		// Processa comentários
+		for username, commentCount := range week.UserComments {
+			if pc.userStats[username] == nil {
+				pc.userStats[username] = &UserStats{
+					Username:  username,
+					RepoStats: make(map[string]int),
+				}
+			}
+			fmt.Println("ANTES", pc.userStats[username])
+
+			stats := pc.userStats[username]
+			stats.CommentsCount += commentCount
+
+			if username == week.CommentWinner {
+				stats.CommentWeeklyWins++
+				stats.CommentScore++
+			}
+
+			fmt.Println("DEPOIS", pc.userStats[username])
 		}
 	}
 }
@@ -234,14 +426,29 @@ func (pc *PRChampion) GenerateReport() {
 	for _, week := range pc.weeklyData {
 		fmt.Printf("Semana: %s - %s\n",
 			week.StartDate.Format("02/01"), week.EndDate.Format("02/01/2006"))
-		fmt.Printf("🥇 Campeão: %s\n", week.Winner)
 
-		// Top 3 da semana
-		weekTop := pc.getTopUsersForWeek(week.UserPRs, 3)
-		for i, user := range weekTop {
-			medal := []string{"🥇", "🥈", "🥉"}[i]
-			fmt.Printf("   %s %s: %d PRs\n", medal, user.Username, user.PRsCount)
+		// Campeão por PRs
+		if week.Winner != "" {
+			fmt.Printf("🥇 Campeão PRs: %s\n", week.Winner)
+			// Top 3 da semana por PRs
+			weekTop := pc.getTopUsersForWeek(week.UserPRs, 3)
+			for i, user := range weekTop {
+				medal := []string{"🥇", "🥈", "🥉"}[i]
+				fmt.Printf("   %s %s: %d PRs\n", medal, user.Username, user.PRsCount)
+			}
 		}
+
+		// Campeão por comentários
+		if week.CommentWinner != "" {
+			fmt.Printf("💬 Campeão Comentários: %s\n", week.CommentWinner)
+			// Top 3 da semana por comentários
+			weekTopComments := pc.getTopUsersForWeek(week.UserComments, 3)
+			for i, user := range weekTopComments {
+				medal := []string{"🥇", "🥈", "🥉"}[i]
+				fmt.Printf("   %s %s: %d comentários\n", medal, user.Username, user.PRsCount) // PRsCount aqui representa o número de comentários
+			}
+		}
+
 		fmt.Println()
 	}
 
@@ -277,6 +484,61 @@ func (pc *PRChampion) GenerateReport() {
 		position := i + 1
 		medal := []string{"🥇", "🥈", "🥉"}[i]
 		fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
+	}
+	fmt.Println()
+
+	// Ranking geral por pontuação de comentários
+	fmt.Println("💬 RANKING GERAL POR PONTUAÇÃO DE COMENTÁRIOS:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	topCommentUsers := pc.getTopUsersByCommentScore(3)
+	if len(topCommentUsers) == 0 {
+		fmt.Println("   Nenhum ponto por comentários foi atribuído no período analisado.")
+	} else {
+		for i, user := range topCommentUsers {
+			position := i + 1
+			medal := ""
+			switch position {
+			case 1:
+				medal = "🥇"
+			case 2:
+				medal = "🥈"
+			case 3:
+				medal = "🥉"
+			}
+
+			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+			fmt.Printf("   💬 Pontuação: %d pontos\n", user.CommentScore)
+			fmt.Printf("   🏆 Vitórias semanais (comentários): %d\n", user.CommentWeeklyWins)
+			fmt.Printf("   📝 Total de comentários: %d\n\n", user.CommentsCount)
+		}
+	}
+
+	// Top 3 por número total de PRs
+	fmt.Println("📈 TOP 3 POR TOTAL DE PRS:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	topByPRs2 := pc.getTopUsersByPRs(3)
+	for i, user := range topByPRs2 {
+		position := i + 1
+		medal := []string{"🥇", "🥈", "🥉"}[i]
+		fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
+	}
+	fmt.Println()
+
+	// Top 3 por número total de comentários
+	fmt.Println("💬 TOP 3 POR TOTAL DE COMENTÁRIOS:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	topByComments := pc.getTopUsersByComments(3)
+	if len(topByComments) == 0 {
+		fmt.Println("   Nenhum comentário encontrado no período analisado.")
+	} else {
+		for i, user := range topByComments {
+			position := i + 1
+			medal := []string{"🥇", "🥈", "🥉"}[i]
+			fmt.Printf("%s %d° lugar: %s - %d comentários\n", medal, position, user.Username, user.CommentsCount)
+		}
 	}
 }
 
@@ -338,6 +600,77 @@ func (pc *PRChampion) getTopUsersByPRs(limit int) []*UserStats {
 	}
 
 	return users
+}
+
+// getTopUsersByComments retorna os top usuários por número de comentários
+func (pc *PRChampion) getTopUsersByComments(limit int) []*UserStats {
+	var users []*UserStats
+	for _, stats := range pc.userStats {
+		if stats.CommentsCount > 0 { // Apenas usuários que fizeram comentários
+			users = append(users, stats)
+		}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		return users[i].CommentsCount > users[j].CommentsCount
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
+// getTopUsersByCommentScore retorna os top usuários por pontuação de comentários
+func (pc *PRChampion) getTopUsersByCommentScore(limit int) []*UserStats {
+	var users []*UserStats
+	for _, stats := range pc.userStats {
+		if stats.CommentScore > 0 { // Apenas usuários que ganharam pontos por comentários
+			users = append(users, stats)
+		}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		if users[i].CommentScore == users[j].CommentScore {
+			return users[i].CommentsCount > users[j].CommentsCount
+		}
+		return users[i].CommentScore > users[j].CommentScore
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
+// isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários
+func isExcludedUser(username string) bool {
+	excludedUsers := []string{
+		"grupogcb",
+		"sonarqubecloud",
+		"copilot",
+		"github-actions",
+		"dependabot",
+		"codecov",
+		"sonarcloud",
+		"renovate",
+		"greenkeeper",
+		"snyk-bot",
+	}
+
+	// Converte para lowercase para comparação case-insensitive
+	usernameLower := strings.ToLower(username)
+
+	for _, excluded := range excludedUsers {
+		if usernameLower == excluded || strings.Contains(usernameLower, excluded) {
+			return true
+		}
+	}
+
+	// Verifica se termina com [bot] (padrão do GitHub para bots)
+	return strings.HasSuffix(usernameLower, "[bot]")
 }
 
 // getWeekStart retorna o início da semana (segunda-feira)

@@ -8,6 +8,233 @@ import (
 	"github.com/google/go-github/v55/github"
 )
 
+func TestGetTopUsersByComments(t *testing.T) {
+	// Cria instância do PRChampion com dados de teste
+	pc := &PRChampion{
+		userStats: make(map[string]*UserStats),
+	}
+
+	// Adiciona dados de teste
+	pc.userStats["user1"] = &UserStats{
+		Username:          "user1",
+		PRsCount:          5,
+		CommentsCount:     10,
+		CommentScore:      1,
+		CommentWeeklyWins: 1,
+		RepoStats:         make(map[string]int),
+	}
+	pc.userStats["user2"] = &UserStats{
+		Username:          "user2",
+		PRsCount:          3,
+		CommentsCount:     15,
+		CommentScore:      2,
+		CommentWeeklyWins: 2,
+		RepoStats:         make(map[string]int),
+	}
+	pc.userStats["user3"] = &UserStats{
+		Username:          "user3",
+		PRsCount:          8,
+		CommentsCount:     5,
+		CommentScore:      0,
+		CommentWeeklyWins: 0,
+		RepoStats:         make(map[string]int),
+	}
+	pc.userStats["user4"] = &UserStats{
+		Username:          "user4",
+		PRsCount:          2,
+		CommentsCount:     0, // Usuário sem comentários
+		CommentScore:      0,
+		CommentWeeklyWins: 0,
+		RepoStats:         make(map[string]int),
+	}
+
+	// Testa o ranking por comentários (número total)
+	topComments := pc.getTopUsersByComments(3)
+
+	if len(topComments) != 3 {
+		t.Errorf("Expected 3 users with comments, got %d", len(topComments))
+	}
+
+	// Verifica se estão ordenados corretamente por número de comentários
+	if topComments[0].Username != "user2" || topComments[0].CommentsCount != 15 {
+		t.Errorf("Expected user2 with 15 comments at position 0, got %s with %d comments",
+			topComments[0].Username, topComments[0].CommentsCount)
+	}
+
+	if topComments[1].Username != "user1" || topComments[1].CommentsCount != 10 {
+		t.Errorf("Expected user1 with 10 comments at position 1, got %s with %d comments",
+			topComments[1].Username, topComments[1].CommentsCount)
+	}
+
+	if topComments[2].Username != "user3" || topComments[2].CommentsCount != 5 {
+		t.Errorf("Expected user3 with 5 comments at position 2, got %s with %d comments",
+			topComments[2].Username, topComments[2].CommentsCount)
+	}
+
+	// Testa o ranking por pontuação de comentários
+	topCommentScore := pc.getTopUsersByCommentScore(3)
+
+	if len(topCommentScore) != 2 { // Apenas user1 e user2 têm pontos
+		t.Errorf("Expected 2 users with comment score, got %d", len(topCommentScore))
+	}
+
+	// Verifica se estão ordenados corretamente por pontuação
+	if topCommentScore[0].Username != "user2" || topCommentScore[0].CommentScore != 2 {
+		t.Errorf("Expected user2 with 2 points at position 0, got %s with %d points",
+			topCommentScore[0].Username, topCommentScore[0].CommentScore)
+	}
+
+	if topCommentScore[1].Username != "user1" || topCommentScore[1].CommentScore != 1 {
+		t.Errorf("Expected user1 with 1 point at position 1, got %s with %d points",
+			topCommentScore[1].Username, topCommentScore[1].CommentScore)
+	}
+
+	// Verifica que user4 não está incluído (0 comentários)
+	for _, user := range topComments {
+		if user.Username == "user4" {
+			t.Error("user4 should not be included in top comments (has 0 comments)")
+		}
+	}
+}
+
+func TestIsExcludedUser(t *testing.T) {
+	tests := []struct {
+		username string
+		expected bool
+	}{
+		{"GrupoGCB", true},
+		{"grupogcb", true},
+		{"GRUPOGCB", true},
+		{"sonarqubecloud", true},
+		{"SonarQubeCloud", true},
+		{"copilot", true},
+		{"GitHub-Actions", true},
+		{"dependabot", true},
+		{"codecov", true},
+		{"renovate[bot]", true},
+		{"github-actions[bot]", true},
+		{"my-custom-bot[bot]", true},
+		{"normaluser", false},
+		{"john_doe", false},
+		{"developer123", false},
+		{"", false},
+	}
+
+	for _, test := range tests {
+		result := isExcludedUser(test.username)
+		if result != test.expected {
+			t.Errorf("For username '%s', expected %v, got %v", test.username, test.expected, result)
+		}
+	}
+}
+
+// TestUserStatsReferenceUpdate testa se as modificações nos UserStats estão sendo persistidas corretamente
+func TestUserStatsReferenceUpdate(t *testing.T) {
+	// Cria uma instância do PRChampion
+	pc := &PRChampion{
+		userStats: make(map[string]*UserStats),
+	}
+
+	// Simula dados semanais
+	pc.weeklyData = []WeeklyData{
+		{
+			StartDate: time.Now().Add(-7 * 24 * time.Hour),
+			EndDate:   time.Now(),
+			UserPRs: map[string]int{
+				"user1": 5,
+				"user2": 3,
+			},
+			Winner: "user1",
+			UserComments: map[string]int{
+				"user1": 10,
+				"user2": 15,
+			},
+			CommentWinner: "user2",
+		},
+		{
+			StartDate: time.Now().Add(-14 * 24 * time.Hour),
+			EndDate:   time.Now().Add(-7 * 24 * time.Hour),
+			UserPRs: map[string]int{
+				"user1": 2,
+				"user2": 8,
+			},
+			Winner: "user2",
+			UserComments: map[string]int{
+				"user1": 5,
+				"user2": 7,
+			},
+			CommentWinner: "user2",
+		},
+	}
+
+	// Executa o cálculo de estatísticas
+	pc.calculateUserStats()
+
+	// Verifica se user1 foi atualizado corretamente
+	user1 := pc.userStats["user1"]
+	if user1 == nil {
+		t.Fatal("user1 should exist in userStats")
+	}
+
+	expectedPRs := 7 // 5 + 2
+	if user1.PRsCount != expectedPRs {
+		t.Errorf("Expected user1 to have %d PRs, got %d", expectedPRs, user1.PRsCount)
+	}
+
+	expectedComments := 15 // 10 + 5
+	if user1.CommentsCount != expectedComments {
+		t.Errorf("Expected user1 to have %d comments, got %d", expectedComments, user1.CommentsCount)
+	}
+
+	expectedWeeklyWins := 1 // ganhou apenas a primeira semana
+	if user1.WeeklyWins != expectedWeeklyWins {
+		t.Errorf("Expected user1 to have %d weekly wins, got %d", expectedWeeklyWins, user1.WeeklyWins)
+	}
+
+	expectedCommentScore := 0 // não ganhou nenhuma semana por comentários
+	if user1.CommentScore != expectedCommentScore {
+		t.Errorf("Expected user1 to have %d comment score, got %d", expectedCommentScore, user1.CommentScore)
+	}
+
+	// Verifica se user2 foi atualizado corretamente
+	user2 := pc.userStats["user2"]
+	if user2 == nil {
+		t.Fatal("user2 should exist in userStats")
+	}
+
+	expectedPRs = 11 // 3 + 8
+	if user2.PRsCount != expectedPRs {
+		t.Errorf("Expected user2 to have %d PRs, got %d", expectedPRs, user2.PRsCount)
+	}
+
+	expectedComments = 22 // 15 + 7
+	if user2.CommentsCount != expectedComments {
+		t.Errorf("Expected user2 to have %d comments, got %d", expectedComments, user2.CommentsCount)
+	}
+
+	expectedWeeklyWins = 1 // ganhou apenas a segunda semana
+	if user2.WeeklyWins != expectedWeeklyWins {
+		t.Errorf("Expected user2 to have %d weekly wins, got %d", expectedWeeklyWins, user2.WeeklyWins)
+	}
+
+	expectedCommentScore = 2 // ganhou as duas semanas por comentários
+	if user2.CommentScore != expectedCommentScore {
+		t.Errorf("Expected user2 to have %d comment score, got %d", expectedCommentScore, user2.CommentScore)
+	}
+
+	// Teste adicional: verifica se modificar através de uma variável local realmente afeta o map
+	user1Copy := pc.userStats["user1"]
+	originalPRs := user1Copy.PRsCount
+	user1Copy.PRsCount = 999
+
+	if pc.userStats["user1"].PRsCount != 999 {
+		t.Errorf("Reference update failed: expected 999, got %d", pc.userStats["user1"].PRsCount)
+	}
+
+	// Restaura o valor original para não afetar outros testes
+	user1Copy.PRsCount = originalPRs
+}
+
 func TestParseDate(t *testing.T) {
 	tests := []struct {
 		input    string

@@ -10,6 +10,7 @@
 - 🏆 O usuário com mais PRs mergeados na semana ganha **1 ponto**
 - 🥇 Gera ranking final com os top 3 usuários por pontuação total agregada
 - 📈 Mostra também o top 3 por número total de PRs
+- 💬 **NOVO**: Sistema de pontuação por comentários - o usuário que mais comentou na semana ganha 1 ponto (com filtro automático de bots)
 
 ## Instalação
 
@@ -171,16 +172,24 @@ export GITHUB_REPOS="microsoft/vscode,facebook/react"
 📅 RESUMO SEMANAL:
 ============================================================
 Semana: 02/09 - 08/09/2024
-🥇 Campeão: joao_dev
+🥇 Campeão PRs: joao_dev
    🥇 joao_dev: 12 PRs
    🥈 maria_code: 8 PRs
    🥉 pedro_git: 6 PRs
+💬 Campeão Comentários: ana_prog
+   🥇 ana_prog: 25 comentários
+   🥈 joao_dev: 18 comentários
+   🥉 pedro_git: 12 comentários
 
 Semana: 09/09 - 15/09/2024
-🥇 Campeão: maria_code
+🥇 Campeão PRs: maria_code
    🥇 maria_code: 15 PRs
    🥈 joao_dev: 10 PRs
    🥉 ana_prog: 7 PRs
+💬 Campeão Comentários: maria_code
+   🥇 maria_code: 22 comentários
+   🥈 pedro_git: 16 comentários
+   🥉 ana_prog: 14 comentários
 
 🏅 RANKING GERAL POR PONTUAÇÃO:
 ============================================================
@@ -199,11 +208,29 @@ Semana: 09/09 - 15/09/2024
    🏆 Vitórias semanais: 1
    📋 Total de PRs: 38
 
-📈 TOP 3 POR TOTAL DE PRS:
+� RANKING GERAL POR PONTUAÇÃO DE COMENTÁRIOS:
+============================================================
+🥇 1° lugar: ana_prog
+   💬 Pontuação: 2 pontos
+   🏆 Vitórias semanais (comentários): 2
+   📝 Total de comentários: 89
+
+🥈 2° lugar: maria_code
+   💬 Pontuação: 1 pontos
+   🏆 Vitórias semanais (comentários): 1
+   📝 Total de comentários: 67
+
+�📈 TOP 3 POR TOTAL DE PRS:
 ============================================================
 🥇 1° lugar: maria_code - 52 PRs
 🥈 2° lugar: joao_dev - 45 PRs
 🥉 3° lugar: pedro_git - 38 PRs
+
+💬 TOP 3 POR TOTAL DE COMENTÁRIOS:
+============================================================
+🥇 1° lugar: ana_prog - 127 comentários
+🥈 2° lugar: joao_dev - 89 comentários
+🥉 3° lugar: maria_code - 76 comentários
 
 ✅ Relatório gerado com sucesso!
 ```
@@ -221,9 +248,11 @@ Semana: 09/09 - 15/09/2024
 - Critério de desempate: número total de PRs
 
 ### 📈 Relatórios Múltiplos
-- **Ranking por pontuação**: Top 3 usuários que mais ganharam semanas
+- **Ranking por pontuação (PRs)**: Top 3 usuários que mais ganharam semanas por PRs
+- **Ranking por pontuação (Comentários)**: Top 3 usuários que mais ganharam semanas por comentários  
 - **Ranking por PRs**: Top 3 usuários por volume total de PRs
-- **Resumo semanal**: Detalhamento semana a semana
+- **Ranking por comentários**: Top 3 usuários que mais comentaram nos PRs
+- **Resumo semanal**: Detalhamento semana a semana com duplo campeão
 
 ## Limitações
 
