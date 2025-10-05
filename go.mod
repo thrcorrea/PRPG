@@ -1,4 +1,4 @@
-module github.com/PR-Champion
+module github.com/thrcorrea/PRPG
 
 go 1.21
 

@@ -12,7 +12,7 @@ import (
 	"github.com/google/go-github/v55/github"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
+	"github.com/thrcorrea/PRPG/internal/infrastructure"
 )
 
 // Repository representa um repositório para análise
@@ -51,7 +51,8 @@ type WeeklyData struct {
 
 // PRChampion é a estrutura principal da aplicação
 type PRChampion struct {
-	client       *github.Client
+	client infrastructure.GithubAdapter
+	// client       *github.Client
 	repositories []Repository
 	startDate    time.Time
 	endDate      time.Time
@@ -61,12 +62,13 @@ type PRChampion struct {
 
 // NewPRChampion cria uma nova instância do PR Champion
 func NewPRChampion(token string, repositories []Repository, startDate, endDate time.Time) *PRChampion {
-	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
-	)
-	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
+	// ctx := context.Background()
+	// ts := oauth2.StaticTokenSource(
+	// 	&oauth2.Token{AccessToken: token},
+	// )
+	// tc := oauth2.NewClient(ctx, ts)
+	// client := github.NewClient(tc)
+	client := infrastructure.NewGithubClient(token)
 
 	return &PRChampion{
 		client:       client,
@@ -88,7 +90,7 @@ func (pc *PRChampion) FetchMergedPRs() error {
 	for _, repo := range pc.repositories {
 		fmt.Printf("  📁 Analisando %s/%s...\n", repo.Owner, repo.Name)
 
-		repoPRs, err := pc.fetchPRsForRepo(repo)
+		repoPRs, err := pc.client.FetchPRsForRepo(repo.Owner, repo.Name, pc.startDate, pc.endDate)
 		if err != nil {
 			fmt.Printf("  ⚠️  Erro ao buscar PRs do repo %s/%s: %v\n", repo.Owner, repo.Name, err)
 			continue // Continua com os outros repositórios
@@ -110,55 +112,6 @@ func (pc *PRChampion) FetchMergedPRs() error {
 	return nil
 }
 
-// fetchPRsForRepo busca PRs de um repositório específico
-func (pc *PRChampion) fetchPRsForRepo(repo Repository) ([]*github.PullRequest, error) {
-	ctx := context.Background()
-
-	opts := &github.PullRequestListOptions{
-		State:     "closed",
-		Sort:      "updated",
-		Direction: "desc",
-		ListOptions: github.ListOptions{
-			PerPage: 100,
-		},
-	}
-
-	var repoPRs []*github.PullRequest
-	shouldStop := false
-
-	for !shouldStop {
-		prs, resp, err := pc.client.PullRequests.List(ctx, repo.Owner, repo.Name, opts)
-		if err != nil {
-			return nil, fmt.Errorf("erro ao buscar PRs: %v", err)
-		}
-
-		for _, pr := range prs {
-			if pr.MergedAt == nil {
-				continue // Pula PRs não mergeados
-			}
-
-			mergedAt := pr.MergedAt.Time
-			if mergedAt.Before(pc.startDate) {
-				// Se chegamos a PRs anteriores ao período, paramos de buscar mais páginas
-				shouldStop = true
-				break
-			}
-
-			if mergedAt.After(pc.startDate) && mergedAt.Before(pc.endDate.Add(24*time.Hour)) {
-				repoPRs = append(repoPRs, pr)
-			}
-		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		opts.Page = resp.NextPage
-	}
-
-	fmt.Printf("    ✅ %d PRs encontrados em %s/%s\n", len(repoPRs), repo.Owner, repo.Name)
-	return repoPRs, nil
-}
-
 // fetchCommentsForPRs busca comentários de todos os PRs
 func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 	fmt.Printf("💬 Buscando comentários dos PRs...\n")
@@ -175,106 +128,78 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 		repoOwner := pr.Base.Repo.Owner.GetLogin()
 		repoName := pr.Base.Repo.GetName()
 		prNumber := pr.GetNumber()
-
-		// Busca comentários do PR
-		opts := &github.IssueListCommentsOptions{
-			ListOptions: github.ListOptions{
-				PerPage: 100,
-			},
+		comments, err := pc.client.ListPRComments(ctx, repoOwner, repoName, prNumber)
+		if err != nil {
+			fmt.Printf("  ⚠️  Erro ao buscar comentários do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
+			break
 		}
 
-		for {
-			comments, resp, err := pc.client.Issues.ListComments(ctx, repoOwner, repoName, prNumber, opts)
-			if err != nil {
-				fmt.Printf("  ⚠️  Erro ao buscar comentários do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
-				break
-			}
+		for _, comment := range comments {
+			commentTime := comment.CreatedAt.Time
+			// Verifica se o comentário foi feito no período analisado
+			if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
+				username := comment.User.GetLogin()
 
-			for _, comment := range comments {
-				commentTime := comment.CreatedAt.Time
-				// Verifica se o comentário foi feito no período analisado
-				if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
-					username := comment.User.GetLogin()
-
-					// Filtra usuários excluídos (bots, sonarqube, etc.)
-					if isExcludedUser(username) {
-						continue
-					}
-
-					// Determina a semana do comentário
-					weekStart := getWeekStart(commentTime)
-					weekKey := weekStart.Format("2006-01-02")
-
-					if weeklyComments[weekKey] == nil {
-						weeklyComments[weekKey] = make(map[string]int)
-						weeklyWeightedComments[weekKey] = make(map[string]float64)
-						weekStarts[weekKey] = weekStart
-					}
-
-					// Calcula pontuação ponderada baseada nas reações
-					commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID())
-
-					weeklyComments[weekKey][username]++
-					weeklyWeightedComments[weekKey][username] += commentScore
-					totalComments++
+				// Filtra usuários excluídos (bots, sonarqube, etc.)
+				if isExcludedUser(username) {
+					continue
 				}
-			}
 
-			if resp.NextPage == 0 {
-				break
-			}
-			opts.Page = resp.NextPage
-		}
+				// Determina a semana do comentário
+				weekStart := getWeekStart(commentTime)
+				weekKey := weekStart.Format("2006-01-02")
 
-		// Busca review comments (comentários de revisão de código)
-		reviewOpts := &github.PullRequestListCommentsOptions{
-			ListOptions: github.ListOptions{
-				PerPage: 100,
-			},
-		}
-
-		for {
-			reviewComments, resp, err := pc.client.PullRequests.ListComments(ctx, repoOwner, repoName, prNumber, reviewOpts)
-			if err != nil {
-				fmt.Printf("  ⚠️  Erro ao buscar review comments do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
-				break
-			}
-
-			for _, comment := range reviewComments {
-				commentTime := comment.CreatedAt.Time
-				// Verifica se o comentário foi feito no período analisado
-				if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
-					username := comment.User.GetLogin()
-
-					// Filtra usuários excluídos (bots, sonarqube, etc.)
-					if isExcludedUser(username) {
-						continue
-					}
-
-					// Determina a semana do comentário
-					weekStart := getWeekStart(commentTime)
-					weekKey := weekStart.Format("2006-01-02")
-
-					if weeklyComments[weekKey] == nil {
-						weeklyComments[weekKey] = make(map[string]int)
-						weeklyWeightedComments[weekKey] = make(map[string]float64)
-						weekStarts[weekKey] = weekStart
-					}
-
-					// Calcula pontuação ponderada baseada nas reações
-					commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID())
-
-					weeklyComments[weekKey][username]++
-					weeklyWeightedComments[weekKey][username] += commentScore
-					totalComments++
+				if weeklyComments[weekKey] == nil {
+					weeklyComments[weekKey] = make(map[string]int)
+					weeklyWeightedComments[weekKey] = make(map[string]float64)
+					weekStarts[weekKey] = weekStart
 				}
-			}
 
-			if resp.NextPage == 0 {
-				break
+				// Calcula pontuação ponderada baseada nas reações
+				commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID())
+
+				weeklyComments[weekKey][username]++
+				weeklyWeightedComments[weekKey][username] += commentScore
+				totalComments++
 			}
-			reviewOpts.Page = resp.NextPage
 		}
+
+		reviewComments, err := pc.client.ListPRReviewComments(ctx, repoOwner, repoName, prNumber)
+		if err != nil {
+			fmt.Printf("  ⚠️  Erro ao buscar review comments do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
+			break
+		}
+
+		for _, comment := range reviewComments {
+			commentTime := comment.CreatedAt.Time
+			// Verifica se o comentário foi feito no período analisado
+			if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
+				username := comment.User.GetLogin()
+
+				// Filtra usuários excluídos (bots, sonarqube, etc.)
+				if isExcludedUser(username) {
+					continue
+				}
+
+				// Determina a semana do comentário
+				weekStart := getWeekStart(commentTime)
+				weekKey := weekStart.Format("2006-01-02")
+
+				if weeklyComments[weekKey] == nil {
+					weeklyComments[weekKey] = make(map[string]int)
+					weeklyWeightedComments[weekKey] = make(map[string]float64)
+					weekStarts[weekKey] = weekStart
+				}
+
+				// Calcula pontuação ponderada baseada nas reações
+				commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID())
+
+				weeklyComments[weekKey][username]++
+				weeklyWeightedComments[weekKey][username] += commentScore
+				totalComments++
+			}
+		}
+
 	}
 
 	// Adiciona dados de comentários às semanas existentes
@@ -854,7 +779,7 @@ func isExcludedUser(username string) bool {
 // calculateCommentScore calcula a pontuação de um comentário baseada em suas reações
 func (pc *PRChampion) calculateCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64) float64 {
 	// Busca as reações do comentário
-	reactions, _, err := pc.client.Reactions.ListIssueCommentReactions(ctx, repoOwner, repoName, commentID, nil)
+	reactions, err := pc.client.ListIssueCommentReactions(ctx, repoOwner, repoName, commentID)
 	if err != nil {
 		// Se não conseguir buscar reações, conta como 1 ponto normal
 		return 1.0
@@ -891,7 +816,7 @@ func (pc *PRChampion) calculateScoreFromReactions(reactions []*github.Reaction) 
 // calculateReviewCommentScore calcula a pontuação de um review comment baseada em suas reações
 func (pc *PRChampion) calculateReviewCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64) float64 {
 	// Busca as reações do review comment
-	reactions, _, err := pc.client.Reactions.ListPullRequestCommentReactions(ctx, repoOwner, repoName, commentID, nil)
+	reactions, err := pc.client.ListPullRequestCommentReactions(ctx, repoOwner, repoName, commentID)
 	if err != nil {
 		// Se não conseguir buscar reações, conta como 1 ponto normal
 		return 1.0
