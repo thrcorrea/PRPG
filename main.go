@@ -145,6 +145,11 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 					continue
 				}
 
+				if username == pr.User.GetLogin() {
+					fmt.Println("    ❗ Comentário do autor do PR ignorado:", username)
+					continue // Pula comentários feitos pelo autor do PR
+				}
+
 				// Determina a semana do comentário
 				weekStart := getWeekStart(commentTime)
 				weekKey := weekStart.Format("2006-01-02")
@@ -457,71 +462,6 @@ func (pc *PRChampion) GenerateReport() {
 		fmt.Printf("   🏆 Vitórias semanais: %d\n", user.WeeklyWins)
 		fmt.Printf("   📋 Total de PRs: %d\n\n", user.PRsCount)
 	}
-
-	// Top 3 por número total de PRs
-	// fmt.Println("📈 TOP 3 POR TOTAL DE PRS:")
-	// fmt.Println(strings.Repeat("=", 60))
-
-	// topByPRs := pc.getTopUsersByPRs(3)
-	// for i, user := range topByPRs {
-	// 	position := i + 1
-	// 	medal := []string{"🥇", "🥈", "🥉"}[i]
-	// 	fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
-	// }
-	// fmt.Println()
-
-	// Ranking geral por pontuação de comentários
-	// fmt.Println("💬 RANKING GERAL POR PONTUAÇÃO DE COMENTÁRIOS:")
-	// fmt.Println(strings.Repeat("=", 60))
-
-	// topCommentUsers := pc.getTopUsersByCommentScore(3)
-	// if len(topCommentUsers) == 0 {
-	// 	fmt.Println("   Nenhum ponto por comentários foi atribuído no período analisado.")
-	// } else {
-	// 	for i, user := range topCommentUsers {
-	// 		position := i + 1
-	// 		medal := ""
-	// 		switch position {
-	// 		case 1:
-	// 			medal = "🥇"
-	// 		case 2:
-	// 			medal = "🥈"
-	// 		case 3:
-	// 			medal = "🥉"
-	// 		}
-
-	// 		fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
-	// 		fmt.Printf("   💬 Pontuação: %d pontos\n", user.CommentScore)
-	// 		fmt.Printf("   🏆 Vitórias semanais (comentários): %d\n", user.CommentWeeklyWins)
-	// 		fmt.Printf("   📝 Total de comentários: %d\n\n", user.CommentsCount)
-	// 	}
-	// }
-
-	// Ranking por pontuação ponderada de comentários (com reações)
-	// fmt.Println("⭐ RANKING POR QUALIDADE DOS COMENTÁRIOS (COM REAÇÕES):")
-	// fmt.Println(strings.Repeat("=", 60))
-
-	// topWeightedCommentUsers := pc.getTopUsersByWeightedCommentScore(3)
-	// if len(topWeightedCommentUsers) == 0 {
-	// 	fmt.Println("   Nenhuma pontuação por reações foi calculada no período analisado.")
-	// } else {
-	// 	for i, user := range topWeightedCommentUsers {
-	// 		position := i + 1
-	// 		medal := ""
-	// 		switch position {
-	// 		case 1:
-	// 			medal = "🥇"
-	// 		case 2:
-	// 			medal = "🥈"
-	// 		case 3:
-	// 			medal = "🥉"
-	// 		}
-
-	// 		fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
-	// 		fmt.Printf("   ⭐ Pontuação com reações: %.1f pontos\n", user.WeightedCommentScore)
-	// 		fmt.Printf("   📝 Total de comentários: %d\n\n", user.CommentsCount)
-	// 	}
-	// }
 
 	// Ranking por pontuação semanal de qualidade de comentários
 	fmt.Println("🏅 RANKING SEMANAL POR QUALIDADE DOS COMENTÁRIOS:")
