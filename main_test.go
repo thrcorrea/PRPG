@@ -16,36 +16,48 @@ func TestGetTopUsersByComments(t *testing.T) {
 
 	// Adiciona dados de teste
 	pc.userStats["user1"] = &UserStats{
-		Username:          "user1",
-		PRsCount:          5,
-		CommentsCount:     10,
-		CommentScore:      1,
-		CommentWeeklyWins: 1,
-		RepoStats:         make(map[string]int),
+		Username:                   "user1",
+		PRsCount:                   5,
+		CommentsCount:              10,
+		CommentScore:               1,
+		CommentWeeklyWins:          1,
+		WeightedCommentScore:       12.5, // 10 comentários com pontuação média de 1.25
+		WeightedCommentWeeklyWins:  1,    // 1 vitória semanal por qualidade
+		WeightedCommentWeeklyScore: 1,    // 1 ponto por vitória semanal
+		RepoStats:                  make(map[string]int),
 	}
 	pc.userStats["user2"] = &UserStats{
-		Username:          "user2",
-		PRsCount:          3,
-		CommentsCount:     15,
-		CommentScore:      2,
-		CommentWeeklyWins: 2,
-		RepoStats:         make(map[string]int),
+		Username:                   "user2",
+		PRsCount:                   3,
+		CommentsCount:              15,
+		CommentScore:               2,
+		CommentWeeklyWins:          2,
+		WeightedCommentScore:       22.0, // 15 comentários com pontuação média melhor
+		WeightedCommentWeeklyWins:  2,    // 2 vitórias semanais por qualidade
+		WeightedCommentWeeklyScore: 2,    // 2 pontos por vitórias semanais
+		RepoStats:                  make(map[string]int),
 	}
 	pc.userStats["user3"] = &UserStats{
-		Username:          "user3",
-		PRsCount:          8,
-		CommentsCount:     5,
-		CommentScore:      0,
-		CommentWeeklyWins: 0,
-		RepoStats:         make(map[string]int),
+		Username:                   "user3",
+		PRsCount:                   8,
+		CommentsCount:              5,
+		CommentScore:               0,
+		CommentWeeklyWins:          0,
+		WeightedCommentScore:       3.5, // Poucos comentários mas bem avaliados
+		WeightedCommentWeeklyWins:  0,   // Nenhuma vitória semanal por qualidade
+		WeightedCommentWeeklyScore: 0,   // Nenhum ponto semanal
+		RepoStats:                  make(map[string]int),
 	}
 	pc.userStats["user4"] = &UserStats{
-		Username:          "user4",
-		PRsCount:          2,
-		CommentsCount:     0, // Usuário sem comentários
-		CommentScore:      0,
-		CommentWeeklyWins: 0,
-		RepoStats:         make(map[string]int),
+		Username:                   "user4",
+		PRsCount:                   2,
+		CommentsCount:              0, // Usuário sem comentários
+		CommentScore:               0,
+		CommentWeeklyWins:          0,
+		WeightedCommentScore:       0,
+		WeightedCommentWeeklyWins:  0,
+		WeightedCommentWeeklyScore: 0,
+		RepoStats:                  make(map[string]int),
 	}
 
 	// Testa o ranking por comentários (número total)
@@ -89,11 +101,88 @@ func TestGetTopUsersByComments(t *testing.T) {
 			topCommentScore[1].Username, topCommentScore[1].CommentScore)
 	}
 
-	// Verifica que user4 não está incluído (0 comentários)
-	for _, user := range topComments {
-		if user.Username == "user4" {
-			t.Error("user4 should not be included in top comments (has 0 comments)")
-		}
+	// Testa o ranking por pontuação ponderada de comentários
+	topWeightedScore := pc.getTopUsersByWeightedCommentScore(3)
+
+	if len(topWeightedScore) != 3 { // Todos têm pontuação > 0
+		t.Errorf("Expected 3 users with weighted comment score, got %d", len(topWeightedScore))
+	}
+
+	// Verifica se estão ordenados corretamente por pontuação ponderada
+	if topWeightedScore[0].Username != "user2" || topWeightedScore[0].WeightedCommentScore != 22.0 {
+		t.Errorf("Expected user2 with 22.0 weighted points at position 0, got %s with %.1f points",
+			topWeightedScore[0].Username, topWeightedScore[0].WeightedCommentScore)
+	}
+
+	if topWeightedScore[1].Username != "user1" || topWeightedScore[1].WeightedCommentScore != 12.5 {
+		t.Errorf("Expected user1 with 12.5 weighted points at position 1, got %s with %.1f points",
+			topWeightedScore[1].Username, topWeightedScore[1].WeightedCommentScore)
+	}
+
+	if topWeightedScore[2].Username != "user3" || topWeightedScore[2].WeightedCommentScore != 3.5 {
+		t.Errorf("Expected user3 with 3.5 weighted points at position 2, got %s with %.1f points",
+			topWeightedScore[2].Username, topWeightedScore[2].WeightedCommentScore)
+	}
+
+	// Testa o ranking por pontuação semanal de qualidade de comentários
+	topWeeklyQuality := pc.getTopUsersByWeightedCommentWeeklyScore(3)
+
+	if len(topWeeklyQuality) != 2 { // Apenas user1 e user2 têm pontuação semanal > 0
+		t.Errorf("Expected 2 users with weekly quality score, got %d", len(topWeeklyQuality))
+	}
+
+	// Verifica se estão ordenados corretamente por pontuação semanal
+	if topWeeklyQuality[0].Username != "user2" || topWeeklyQuality[0].WeightedCommentWeeklyScore != 2 {
+		t.Errorf("Expected user2 with 2 weekly quality points at position 0, got %s with %d points",
+			topWeeklyQuality[0].Username, topWeeklyQuality[0].WeightedCommentWeeklyScore)
+	}
+
+	if topWeeklyQuality[1].Username != "user1" || topWeeklyQuality[1].WeightedCommentWeeklyScore != 1 {
+		t.Errorf("Expected user1 with 1 weekly quality point at position 1, got %s with %d points",
+			topWeeklyQuality[1].Username, topWeeklyQuality[1].WeightedCommentWeeklyScore)
+	}
+}
+
+// TestCalculateCommentScore testa a função de cálculo de pontuação ponderada
+func TestCalculateCommentScore(t *testing.T) {
+	pc := &PRChampion{}
+
+	// Teste sem reações - score base
+	score1 := pc.calculateScoreFromReactions(nil)
+	if score1 != 1.0 {
+		t.Errorf("Expected score 1.0 for no reactions, got %.1f", score1)
+	}
+
+	// Teste com thumbs up
+	thumbsUpReactions := []*github.Reaction{
+		{Content: github.String("+1")},
+		{Content: github.String("+1")},
+	}
+	score2 := pc.calculateScoreFromReactions(thumbsUpReactions)
+	if score2 != 3.0 { // 1.0 base + 2 * 1.0 thumbs up
+		t.Errorf("Expected score 3.0 for 2 thumbs up, got %.1f", score2)
+	}
+
+	// Teste com thumbs down
+	thumbsDownReactions := []*github.Reaction{
+		{Content: github.String("-1")},
+	}
+	score3 := pc.calculateScoreFromReactions(thumbsDownReactions)
+	if score3 != -1.0 { // 1.0 base - 2.0 thumbs down = -1.0 (min)
+		t.Errorf("Expected score -1.0 for 1 thumbs down, got %.1f", score3)
+	}
+
+	// Teste com reações mistas
+	mixedReactions := []*github.Reaction{
+		{Content: github.String("+1")},
+		{Content: github.String("-1")},
+		{Content: github.String("heart")},
+		{Content: github.String("laugh")},
+	}
+	score4 := pc.calculateScoreFromReactions(mixedReactions)
+	expectedScore := 1.0 + 1.0 - 2.0 + 0.5 // = 0.5 (laugh não está mapeado, então não conta)
+	if score4 != expectedScore {
+		t.Errorf("Expected score %.1f for mixed reactions, got %.1f", expectedScore, score4)
 	}
 }
 

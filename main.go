@@ -23,25 +23,30 @@ type Repository struct {
 
 // UserStats representa as estatísticas de um usuário
 type UserStats struct {
-	Username          string
-	PRsCount          int
-	WeeklyWins        int
-	TotalScore        int
-	RepoStats         map[string]int // PRs por repositório
-	CommentsCount     int            // Total de comentários feitos pelo usuário
-	CommentWeeklyWins int            // Vitórias semanais por comentários
-	CommentScore      int            // Pontuação total por comentários
+	Username                   string
+	PRsCount                   int
+	WeeklyWins                 int
+	TotalScore                 int
+	RepoStats                  map[string]int // PRs por repositório
+	CommentsCount              int            // Total de comentários feitos pelo usuário
+	CommentWeeklyWins          int            // Vitórias semanais por comentários
+	CommentScore               int            // Pontuação total por comentários
+	WeightedCommentScore       float64        // Pontuação ponderada por reações (👍=+2, 👎=-1)
+	WeightedCommentWeeklyWins  int            // Vitórias semanais por qualidade de comentários
+	WeightedCommentWeeklyScore int            // Pontuação semanal por qualidade de comentários
 }
 
 // WeeklyData representa os dados de uma semana específica
 type WeeklyData struct {
-	StartDate     time.Time
-	EndDate       time.Time
-	UserPRs       map[string]int
-	Winner        string
-	RepoData      map[string]map[string]int // repo -> user -> PRs
-	UserComments  map[string]int            // comentários por usuário na semana
-	CommentWinner string                    // vencedor da semana por comentários
+	StartDate             time.Time
+	EndDate               time.Time
+	UserPRs               map[string]int
+	Winner                string
+	RepoData              map[string]map[string]int // repo -> user -> PRs
+	UserComments          map[string]int            // comentários por usuário na semana
+	CommentWinner         string                    // vencedor da semana por comentários
+	UserWeightedComments  map[string]float64        // pontuação ponderada por usuário na semana
+	WeightedCommentWinner string                    // vencedor da semana por pontuação ponderada
 }
 
 // PRChampion é a estrutura principal da aplicação
@@ -161,8 +166,9 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 	ctx := context.Background()
 	totalComments := 0
 
-	// Mapa para rastrear comentários por semana
-	weeklyComments := make(map[string]map[string]int) // weekKey -> username -> count
+	// Mapas para rastrear comentários por semana
+	weeklyComments := make(map[string]map[string]int)             // weekKey -> username -> count
+	weeklyWeightedComments := make(map[string]map[string]float64) // weekKey -> username -> weighted score
 	weekStarts := make(map[string]time.Time)
 
 	for _, pr := range prs {
@@ -201,10 +207,15 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 
 					if weeklyComments[weekKey] == nil {
 						weeklyComments[weekKey] = make(map[string]int)
+						weeklyWeightedComments[weekKey] = make(map[string]float64)
 						weekStarts[weekKey] = weekStart
 					}
 
+					// Calcula pontuação ponderada baseada nas reações
+					commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID())
+
 					weeklyComments[weekKey][username]++
+					weeklyWeightedComments[weekKey][username] += commentScore
 					totalComments++
 				}
 			}
@@ -246,10 +257,15 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 
 					if weeklyComments[weekKey] == nil {
 						weeklyComments[weekKey] = make(map[string]int)
+						weeklyWeightedComments[weekKey] = make(map[string]float64)
 						weekStarts[weekKey] = weekStart
 					}
 
+					// Calcula pontuação ponderada baseada nas reações
+					commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID())
+
 					weeklyComments[weekKey][username]++
+					weeklyWeightedComments[weekKey][username] += commentScore
 					totalComments++
 				}
 			}
@@ -262,19 +278,19 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 	}
 
 	// Adiciona dados de comentários às semanas existentes
-	pc.processWeeklyComments(weeklyComments, weekStarts)
+	pc.processWeeklyComments(weeklyComments, weeklyWeightedComments, weekStarts)
 
 	fmt.Printf("💬 Total de comentários encontrados no período: %d\n", totalComments)
 	return nil
 }
 
 // processWeeklyComments processa os comentários por semana e identifica vencedores
-func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string]int, weekStarts map[string]time.Time) {
+func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string]int, weeklyWeightedComments map[string]map[string]float64, weekStarts map[string]time.Time) {
 	// Adiciona dados de comentários às semanas existentes ou cria novas semanas
 	for weekKey, userComments := range weeklyComments {
 		weekStart := weekStarts[weekKey]
 
-		// Encontra o vencedor da semana por comentários
+		// Encontra o vencedor da semana por comentários (contagem simples)
 		var commentWinner string
 		maxComments := 0
 		for user, count := range userComments {
@@ -284,12 +300,25 @@ func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string
 			}
 		}
 
+		// Encontra o vencedor da semana por pontuação ponderada
+		var weightedCommentWinner string
+		maxWeightedScore := 0.0
+		userWeightedComments := weeklyWeightedComments[weekKey]
+		for user, score := range userWeightedComments {
+			if score > maxWeightedScore {
+				maxWeightedScore = score
+				weightedCommentWinner = user
+			}
+		}
+
 		// Procura se já existe uma semana correspondente
 		found := false
 		for i := range pc.weeklyData {
 			if pc.weeklyData[i].StartDate.Equal(weekStart) {
 				pc.weeklyData[i].UserComments = userComments
 				pc.weeklyData[i].CommentWinner = commentWinner
+				pc.weeklyData[i].UserWeightedComments = userWeightedComments
+				pc.weeklyData[i].WeightedCommentWinner = weightedCommentWinner
 				found = true
 				break
 			}
@@ -299,11 +328,13 @@ func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string
 		if !found {
 			weekEnd := weekStart.Add(6 * 24 * time.Hour)
 			pc.weeklyData = append(pc.weeklyData, WeeklyData{
-				StartDate:     weekStart,
-				EndDate:       weekEnd,
-				UserPRs:       make(map[string]int),
-				UserComments:  userComments,
-				CommentWinner: commentWinner,
+				StartDate:             weekStart,
+				EndDate:               weekEnd,
+				UserPRs:               make(map[string]int),
+				UserComments:          userComments,
+				CommentWinner:         commentWinner,
+				UserWeightedComments:  userWeightedComments,
+				WeightedCommentWinner: weightedCommentWinner,
 			})
 		}
 	}
@@ -392,7 +423,6 @@ func (pc *PRChampion) calculateUserStats() {
 					RepoStats: make(map[string]int),
 				}
 			}
-			fmt.Println("ANTES", pc.userStats[username])
 
 			stats := pc.userStats[username]
 			stats.CommentsCount += commentCount
@@ -401,8 +431,25 @@ func (pc *PRChampion) calculateUserStats() {
 				stats.CommentWeeklyWins++
 				stats.CommentScore++
 			}
+		}
 
-			fmt.Println("DEPOIS", pc.userStats[username])
+		// Processa pontuação ponderada de comentários
+		for username, weightedScore := range week.UserWeightedComments {
+			if pc.userStats[username] == nil {
+				pc.userStats[username] = &UserStats{
+					Username:  username,
+					RepoStats: make(map[string]int),
+				}
+			}
+
+			stats := pc.userStats[username]
+			stats.WeightedCommentScore += weightedScore
+
+			// Se for o vencedor da semana por qualidade de comentários, ganha 1 ponto
+			if username == week.WeightedCommentWinner {
+				stats.WeightedCommentWeeklyWins++
+				stats.WeightedCommentWeeklyScore++
+			}
 		}
 	}
 }
@@ -449,6 +496,17 @@ func (pc *PRChampion) GenerateReport() {
 			}
 		}
 
+		// Campeão por qualidade de comentários (pontuação ponderada)
+		if week.WeightedCommentWinner != "" {
+			fmt.Printf("⭐ Campeão Qualidade: %s\n", week.WeightedCommentWinner)
+			// Top 3 da semana por pontuação ponderada
+			weekTopWeighted := pc.getTopUsersForWeekWeighted(week.UserWeightedComments, 3)
+			for i, user := range weekTopWeighted {
+				medal := []string{"🥇", "🥈", "🥉"}[i]
+				fmt.Printf("   %s %s: %.1f pontos\n", medal, user.Username, user.WeightedCommentScore)
+			}
+		}
+
 		fmt.Println()
 	}
 
@@ -476,26 +534,79 @@ func (pc *PRChampion) GenerateReport() {
 	}
 
 	// Top 3 por número total de PRs
-	fmt.Println("📈 TOP 3 POR TOTAL DE PRS:")
-	fmt.Println(strings.Repeat("=", 60))
+	// fmt.Println("📈 TOP 3 POR TOTAL DE PRS:")
+	// fmt.Println(strings.Repeat("=", 60))
 
-	topByPRs := pc.getTopUsersByPRs(3)
-	for i, user := range topByPRs {
-		position := i + 1
-		medal := []string{"🥇", "🥈", "🥉"}[i]
-		fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
-	}
-	fmt.Println()
+	// topByPRs := pc.getTopUsersByPRs(3)
+	// for i, user := range topByPRs {
+	// 	position := i + 1
+	// 	medal := []string{"🥇", "🥈", "🥉"}[i]
+	// 	fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
+	// }
+	// fmt.Println()
 
 	// Ranking geral por pontuação de comentários
-	fmt.Println("💬 RANKING GERAL POR PONTUAÇÃO DE COMENTÁRIOS:")
+	// fmt.Println("💬 RANKING GERAL POR PONTUAÇÃO DE COMENTÁRIOS:")
+	// fmt.Println(strings.Repeat("=", 60))
+
+	// topCommentUsers := pc.getTopUsersByCommentScore(3)
+	// if len(topCommentUsers) == 0 {
+	// 	fmt.Println("   Nenhum ponto por comentários foi atribuído no período analisado.")
+	// } else {
+	// 	for i, user := range topCommentUsers {
+	// 		position := i + 1
+	// 		medal := ""
+	// 		switch position {
+	// 		case 1:
+	// 			medal = "🥇"
+	// 		case 2:
+	// 			medal = "🥈"
+	// 		case 3:
+	// 			medal = "🥉"
+	// 		}
+
+	// 		fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+	// 		fmt.Printf("   💬 Pontuação: %d pontos\n", user.CommentScore)
+	// 		fmt.Printf("   🏆 Vitórias semanais (comentários): %d\n", user.CommentWeeklyWins)
+	// 		fmt.Printf("   📝 Total de comentários: %d\n\n", user.CommentsCount)
+	// 	}
+	// }
+
+	// Ranking por pontuação ponderada de comentários (com reações)
+	// fmt.Println("⭐ RANKING POR QUALIDADE DOS COMENTÁRIOS (COM REAÇÕES):")
+	// fmt.Println(strings.Repeat("=", 60))
+
+	// topWeightedCommentUsers := pc.getTopUsersByWeightedCommentScore(3)
+	// if len(topWeightedCommentUsers) == 0 {
+	// 	fmt.Println("   Nenhuma pontuação por reações foi calculada no período analisado.")
+	// } else {
+	// 	for i, user := range topWeightedCommentUsers {
+	// 		position := i + 1
+	// 		medal := ""
+	// 		switch position {
+	// 		case 1:
+	// 			medal = "🥇"
+	// 		case 2:
+	// 			medal = "🥈"
+	// 		case 3:
+	// 			medal = "🥉"
+	// 		}
+
+	// 		fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+	// 		fmt.Printf("   ⭐ Pontuação com reações: %.1f pontos\n", user.WeightedCommentScore)
+	// 		fmt.Printf("   📝 Total de comentários: %d\n\n", user.CommentsCount)
+	// 	}
+	// }
+
+	// Ranking por pontuação semanal de qualidade de comentários
+	fmt.Println("🏅 RANKING SEMANAL POR QUALIDADE DOS COMENTÁRIOS:")
 	fmt.Println(strings.Repeat("=", 60))
 
-	topCommentUsers := pc.getTopUsersByCommentScore(3)
-	if len(topCommentUsers) == 0 {
-		fmt.Println("   Nenhum ponto por comentários foi atribuído no período analisado.")
+	topWeightedCommentWeeklyUsers := pc.getTopUsersByWeightedCommentWeeklyScore(3)
+	if len(topWeightedCommentWeeklyUsers) == 0 {
+		fmt.Println("   Nenhuma vitória semanal por qualidade de comentários foi registrada no período analisado.")
 	} else {
-		for i, user := range topCommentUsers {
+		for i, user := range topWeightedCommentWeeklyUsers {
 			position := i + 1
 			medal := ""
 			switch position {
@@ -508,9 +619,9 @@ func (pc *PRChampion) GenerateReport() {
 			}
 
 			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
-			fmt.Printf("   💬 Pontuação: %d pontos\n", user.CommentScore)
-			fmt.Printf("   🏆 Vitórias semanais (comentários): %d\n", user.CommentWeeklyWins)
-			fmt.Printf("   📝 Total de comentários: %d\n\n", user.CommentsCount)
+			fmt.Printf("   🏅 Pontuação semanal: %d pontos\n", user.WeightedCommentWeeklyScore)
+			fmt.Printf("   🏆 Vitórias semanais (qualidade): %d\n", user.WeightedCommentWeeklyWins)
+			fmt.Printf("   ⭐ Pontuação total com reações: %.1f pontos\n\n", user.WeightedCommentScore)
 		}
 	}
 
@@ -554,6 +665,27 @@ func (pc *PRChampion) getTopUsersForWeek(userPRs map[string]int, limit int) []Us
 
 	sort.Slice(users, func(i, j int) bool {
 		return users[i].PRsCount > users[j].PRsCount
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
+// getTopUsersForWeekWeighted retorna os top usuários por pontuação ponderada de uma semana específica
+func (pc *PRChampion) getTopUsersForWeekWeighted(userWeightedComments map[string]float64, limit int) []UserStats {
+	var users []UserStats
+	for username, weightedScore := range userWeightedComments {
+		users = append(users, UserStats{
+			Username:             username,
+			WeightedCommentScore: weightedScore,
+		})
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		return users[i].WeightedCommentScore > users[j].WeightedCommentScore
 	})
 
 	if len(users) > limit {
@@ -645,6 +777,52 @@ func (pc *PRChampion) getTopUsersByCommentScore(limit int) []*UserStats {
 	return users
 }
 
+// getTopUsersByWeightedCommentScore retorna os top usuários por pontuação ponderada de comentários
+func (pc *PRChampion) getTopUsersByWeightedCommentScore(limit int) []*UserStats {
+	var users []*UserStats
+	for _, stats := range pc.userStats {
+		if stats.WeightedCommentScore > 0 { // Apenas usuários com pontuação positiva
+			users = append(users, stats)
+		}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		if users[i].WeightedCommentScore == users[j].WeightedCommentScore {
+			return users[i].CommentsCount > users[j].CommentsCount
+		}
+		return users[i].WeightedCommentScore > users[j].WeightedCommentScore
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
+// getTopUsersByWeightedCommentWeeklyScore retorna os top usuários por pontuação semanal de qualidade de comentários
+func (pc *PRChampion) getTopUsersByWeightedCommentWeeklyScore(limit int) []*UserStats {
+	var users []*UserStats
+	for _, stats := range pc.userStats {
+		if stats.WeightedCommentWeeklyScore > 0 { // Apenas usuários que ganharam pontos semanais por qualidade
+			users = append(users, stats)
+		}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		if users[i].WeightedCommentWeeklyScore == users[j].WeightedCommentWeeklyScore {
+			return users[i].WeightedCommentWeeklyWins > users[j].WeightedCommentWeeklyWins
+		}
+		return users[i].WeightedCommentWeeklyScore > users[j].WeightedCommentWeeklyScore
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
 // isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários
 func isExcludedUser(username string) bool {
 	excludedUsers := []string{
@@ -671,6 +849,55 @@ func isExcludedUser(username string) bool {
 
 	// Verifica se termina com [bot] (padrão do GitHub para bots)
 	return strings.HasSuffix(usernameLower, "[bot]")
+}
+
+// calculateCommentScore calcula a pontuação de um comentário baseada em suas reações
+func (pc *PRChampion) calculateCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64) float64 {
+	// Busca as reações do comentário
+	reactions, _, err := pc.client.Reactions.ListIssueCommentReactions(ctx, repoOwner, repoName, commentID, nil)
+	if err != nil {
+		// Se não conseguir buscar reações, conta como 1 ponto normal
+		return 1.0
+	}
+
+	return pc.calculateScoreFromReactions(reactions)
+}
+
+// calculateScoreFromReactions calcula a pontuação baseada em uma lista de reações
+func (pc *PRChampion) calculateScoreFromReactions(reactions []*github.Reaction) float64 {
+	score := 1.0 // Pontuação base do comentário
+
+	for _, reaction := range reactions {
+		switch reaction.GetContent() {
+		case "+1": // 👍
+			score += 1.0 // +1 adicional (total = 2)
+		case "-1": // 👎
+			score -= 2.0 // -2 para neutralizar o ponto base e ainda penalizar (-1)
+		case "heart", "hooray", "rocket": // ❤️ 🎉 🚀
+			score += 0.5 // Reações positivas menores
+		case "confused", "eyes": // 😕 👀
+			score -= 0.5 // Reações neutras/negativas menores
+		}
+	}
+
+	// Garante que a pontuação mínima seja -1 (para comentários muito mal recebidos)
+	if score < -1.0 {
+		score = -1.0
+	}
+
+	return score
+}
+
+// calculateReviewCommentScore calcula a pontuação de um review comment baseada em suas reações
+func (pc *PRChampion) calculateReviewCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64) float64 {
+	// Busca as reações do review comment
+	reactions, _, err := pc.client.Reactions.ListPullRequestCommentReactions(ctx, repoOwner, repoName, commentID, nil)
+	if err != nil {
+		// Se não conseguir buscar reações, conta como 1 ponto normal
+		return 1.0
+	}
+
+	return pc.calculateScoreFromReactions(reactions)
 }
 
 // getWeekStart retorna o início da semana (segunda-feira)
