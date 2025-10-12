@@ -51,8 +51,8 @@ type WeeklyData struct {
 
 // PRChampion é a estrutura principal da aplicação
 type PRChampion struct {
-	client infrastructure.GithubAdapter
-	// client       *github.Client
+	client       infrastructure.GithubAdapter
+	cachedClient infrastructure.CacheableGithubAdapter // Para operações de cache
 	repositories []Repository
 	startDate    time.Time
 	endDate      time.Time
@@ -61,23 +61,30 @@ type PRChampion struct {
 }
 
 // NewPRChampion cria uma nova instância do PR Champion
-func NewPRChampion(token string, repositories []Repository, startDate, endDate time.Time) *PRChampion {
-	// ctx := context.Background()
-	// ts := oauth2.StaticTokenSource(
-	// 	&oauth2.Token{AccessToken: token},
-	// )
-	// tc := oauth2.NewClient(ctx, ts)
-	// client := github.NewClient(tc)
-	client := infrastructure.NewGithubClient(token)
+func NewPRChampion(token string, repositories []Repository, startDate, endDate time.Time) (*PRChampion, error) {
+	// Cria cliente com cache em banco de dados
+	cachedClient, err := infrastructure.NewCachedGithubAdapter(token, "./data/comments.db")
+	if err != nil {
+		return nil, fmt.Errorf("erro ao criar cliente com cache: %v", err)
+	}
 
 	return &PRChampion{
-		client:       client,
+		client:       cachedClient,
+		cachedClient: cachedClient,
 		repositories: repositories,
 		startDate:    startDate,
 		endDate:      endDate,
 		weeklyData:   []WeeklyData{},
 		userStats:    make(map[string]*UserStats),
+	}, nil
+}
+
+// ClearCache limpa todo o cache do banco de dados
+func (pc *PRChampion) ClearCache() error {
+	if pc.cachedClient == nil {
+		return fmt.Errorf("cliente com cache não está disponível")
 	}
+	return pc.cachedClient.ClearCache()
 }
 
 // FetchMergedPRs busca todos os PRs mergeados no período especificado para todos os repositórios
@@ -516,6 +523,15 @@ func (pc *PRChampion) GenerateReport() {
 			fmt.Printf("%s %d° lugar: %s - %d comentários\n", medal, position, user.Username, user.CommentsCount)
 		}
 	}
+	fmt.Println()
+
+	// Estatísticas do cache
+	fmt.Println("📈 ESTATÍSTICAS DO CACHE:")
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println("💾 Sistema de cache em banco SQLite ativo")
+	fmt.Println("📋 Cache de comentários e reações: 7 dias")
+	fmt.Println("🗂️  Local do banco: ./data/comments.db")
+	fmt.Println("💡 Use --clear-database para limpar todo o cache")
 }
 
 // getTopUsersForWeek retorna os top usuários de uma semana específica
@@ -843,6 +859,7 @@ Repositórios podem ser especificados via:
 		startDateStr, _ := cmd.Flags().GetString("start")
 		endDateStr, _ := cmd.Flags().GetString("end")
 		daysBack, _ := cmd.Flags().GetInt("days")
+		clearDatabase, _ := cmd.Flags().GetBool("clear-database")
 
 		// Validação do token
 		if token == "" {
@@ -921,7 +938,26 @@ Repositórios podem ser especificados via:
 
 		fmt.Println("🚀 Iniciando PR Champion...")
 
-		prChampion := NewPRChampion(token, repositories, startDate, endDate)
+		prChampion, err := NewPRChampion(token, repositories, startDate, endDate)
+		if err != nil {
+			log.Fatalf("❌ Erro ao inicializar PR Champion: %v", err)
+		}
+
+		// Garante que a conexão seja fechada no final
+		defer func() {
+			if prChampion.cachedClient != nil {
+				prChampion.cachedClient.Close()
+			}
+		}()
+
+		// Se a flag clear-database foi especificada, limpa o cache primeiro
+		if clearDatabase {
+			fmt.Println("🗑️  Limpando cache do banco de dados...")
+			if err := prChampion.ClearCache(); err != nil {
+				log.Fatalf("❌ Erro ao limpar cache: %v", err)
+			}
+			fmt.Println("✅ Cache limpo com sucesso!")
+		}
 
 		if err := prChampion.FetchMergedPRs(); err != nil {
 			log.Fatalf("❌ Erro ao buscar PRs: %v", err)
@@ -941,6 +977,7 @@ func init() {
 	rootCmd.Flags().StringP("start", "s", "", "Data de início (DD/MM/YYYY ou YYYY-MM-DD)")
 	rootCmd.Flags().StringP("end", "e", "", "Data de fim (DD/MM/YYYY ou YYYY-MM-DD)")
 	rootCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para analisar (alternativa às datas específicas)")
+	rootCmd.Flags().BoolP("clear-database", "c", false, "Limpa todo o cache do banco de dados antes de executar")
 }
 
 func main() {

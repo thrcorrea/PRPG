@@ -11,10 +11,18 @@ import (
 
 type GithubAdapter interface {
 	FetchPRsForRepo(owner, name string, startDate, endDate time.Time) ([]*github.PullRequest, error)
+	GetPR(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, error)
 	ListIssueCommentReactions(ctx context.Context, owner, repo string, issueNumber int64) ([]*github.Reaction, error)
 	ListPullRequestCommentReactions(ctx context.Context, owner, repo string, commentID int64) ([]*github.Reaction, error)
 	ListPRComments(ctx context.Context, owner, repo string, prNumber int) ([]*github.IssueComment, error)
 	ListPRReviewComments(ctx context.Context, owner, repo string, prNumber int) ([]*github.PullRequestComment, error)
+}
+
+// CacheableGithubAdapter estende GithubAdapter com funcionalidades de cache
+type CacheableGithubAdapter interface {
+	GithubAdapter
+	ClearCache() error
+	Close() error
 }
 
 type githubAdapter struct {
@@ -78,6 +86,15 @@ func (c githubAdapter) FetchPRsForRepo(owner, name string, startDate, endDate ti
 
 	fmt.Printf("    ✅ %d PRs encontrados em %s/%s\n", len(repoPRs), owner, name)
 	return repoPRs, nil
+}
+
+// GetPR busca um PR específico pelo número
+func (c githubAdapter) GetPR(ctx context.Context, owner, repo string, prNumber int) (*github.PullRequest, error) {
+	pr, _, err := c.client.PullRequests.Get(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar PR #%d: %v", prNumber, err)
+	}
+	return pr, nil
 }
 
 func (c githubAdapter) ListIssueCommentReactions(ctx context.Context, owner, repo string, issueNumber int64) ([]*github.Reaction, error) {
