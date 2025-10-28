@@ -45,7 +45,7 @@ func (c githubAdapter) FetchPRsForRepo(owner, name string, startDate, endDate ti
 
 	opts := &github.PullRequestListOptions{
 		State:     "closed",
-		Sort:      "updated",
+		Sort:      "created",
 		Direction: "desc",
 		ListOptions: github.ListOptions{
 			PerPage: 100,
@@ -62,16 +62,19 @@ func (c githubAdapter) FetchPRsForRepo(owner, name string, startDate, endDate ti
 		}
 
 		for _, pr := range prs {
+			// fmt.Println("PR = ", pr.GetTitle())
+			// fmt.Println("PR mergedAt ", pr.MergedAt)
+			// fmt.Println("PR updatedAt ", pr.UpdatedAt)
 			if pr.MergedAt == nil {
 				continue // Pula PRs não mergeados
 			}
 
 			mergedAt := pr.MergedAt.Time
-			if mergedAt.Before(startDate) {
-				// Se chegamos a PRs anteriores ao período, paramos de buscar mais páginas
-				shouldStop = true
-				break
-			}
+			// if mergedAt.Before(startDate) {
+			// 	// Se chegamos a PRs anteriores ao período, paramos de buscar mais páginas
+			// 	shouldStop = true
+			// 	break
+			// }
 
 			if mergedAt.After(startDate) && mergedAt.Before(endDate.Add(24*time.Hour)) {
 				repoPRs = append(repoPRs, pr)

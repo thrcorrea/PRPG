@@ -143,37 +143,34 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 
 		for _, comment := range comments {
 			commentTime := comment.CreatedAt.Time
-			// Verifica se o comentário foi feito no período analisado
-			if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
-				username := comment.User.GetLogin()
+			username := comment.User.GetLogin()
 
-				// Filtra usuários excluídos (bots, sonarqube, etc.)
-				if isExcludedUser(username) {
-					continue
-				}
-
-				if username == pr.User.GetLogin() {
-					fmt.Println("    ❗ Comentário do autor do PR ignorado:", username)
-					continue // Pula comentários feitos pelo autor do PR
-				}
-
-				// Determina a semana do comentário
-				weekStart := getWeekStart(commentTime)
-				weekKey := weekStart.Format("2006-01-02")
-
-				if weeklyComments[weekKey] == nil {
-					weeklyComments[weekKey] = make(map[string]int)
-					weeklyWeightedComments[weekKey] = make(map[string]float64)
-					weekStarts[weekKey] = weekStart
-				}
-
-				// Calcula pontuação ponderada baseada nas reações
-				commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID())
-
-				weeklyComments[weekKey][username]++
-				weeklyWeightedComments[weekKey][username] += commentScore
-				totalComments++
+			// Filtra usuários excluídos (bots, sonarqube, etc.)
+			if isExcludedUser(username) {
+				continue
 			}
+
+			if username == pr.User.GetLogin() {
+				fmt.Println("    ❗ Comentário do autor do PR ignorado:", username)
+				continue // Pula comentários feitos pelo autor do PR
+			}
+
+			// Determina a semana do comentário
+			weekStart := getWeekStart(commentTime)
+			weekKey := weekStart.Format("2006-01-02")
+
+			if weeklyComments[weekKey] == nil {
+				weeklyComments[weekKey] = make(map[string]int)
+				weeklyWeightedComments[weekKey] = make(map[string]float64)
+				weekStarts[weekKey] = weekStart
+			}
+
+			// Calcula pontuação ponderada baseada nas reações
+			commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID())
+
+			weeklyComments[weekKey][username]++
+			weeklyWeightedComments[weekKey][username] += commentScore
+			totalComments++
 		}
 
 		reviewComments, err := pc.client.ListPRReviewComments(ctx, repoOwner, repoName, prNumber)
@@ -184,32 +181,34 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 
 		for _, comment := range reviewComments {
 			commentTime := comment.CreatedAt.Time
-			// Verifica se o comentário foi feito no período analisado
-			if commentTime.After(pc.startDate) && commentTime.Before(pc.endDate.Add(24*time.Hour)) {
-				username := comment.User.GetLogin()
+			username := comment.User.GetLogin()
 
-				// Filtra usuários excluídos (bots, sonarqube, etc.)
-				if isExcludedUser(username) {
-					continue
-				}
-
-				// Determina a semana do comentário
-				weekStart := getWeekStart(commentTime)
-				weekKey := weekStart.Format("2006-01-02")
-
-				if weeklyComments[weekKey] == nil {
-					weeklyComments[weekKey] = make(map[string]int)
-					weeklyWeightedComments[weekKey] = make(map[string]float64)
-					weekStarts[weekKey] = weekStart
-				}
-
-				// Calcula pontuação ponderada baseada nas reações
-				commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID())
-
-				weeklyComments[weekKey][username]++
-				weeklyWeightedComments[weekKey][username] += commentScore
-				totalComments++
+			// Filtra usuários excluídos (bots, sonarqube, etc.)
+			if isExcludedUser(username) {
+				continue
 			}
+
+			if username == pr.User.GetLogin() {
+				fmt.Println("    ❗ Comentário do autor do PR ignorado:", username)
+				continue // Pula comentários feitos pelo autor do PR
+			}
+
+			// Determina a semana do comentário
+			weekStart := getWeekStart(commentTime)
+			weekKey := weekStart.Format("2006-01-02")
+
+			if weeklyComments[weekKey] == nil {
+				weeklyComments[weekKey] = make(map[string]int)
+				weeklyWeightedComments[weekKey] = make(map[string]float64)
+				weekStarts[weekKey] = weekStart
+			}
+
+			// Calcula pontuação ponderada baseada nas reações
+			commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID())
+
+			weeklyComments[weekKey][username]++
+			weeklyWeightedComments[weekKey][username] += commentScore
+			totalComments++
 		}
 
 	}
