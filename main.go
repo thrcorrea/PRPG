@@ -155,6 +155,13 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 				continue // Pula comentários feitos pelo autor do PR
 			}
 
+			// Verifica se o comentário foi feito após o merge do PR
+			if pr.MergedAt != nil && commentTime.After(pr.MergedAt.Time) {
+				fmt.Printf("    ❗ Comentário pós-merge ignorado: %s (comentário: %s, merge: %s)\n",
+					username, commentTime.Format("02/01/2006 15:04"), pr.MergedAt.Time.Format("02/01/2006 15:04"))
+				continue
+			}
+
 			// Determina a semana do comentário
 			weekStart := getWeekStart(commentTime)
 			weekKey := weekStart.Format("2006-01-02")
@@ -191,6 +198,13 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 			if username == pr.User.GetLogin() {
 				fmt.Println("    ❗ Comentário do autor do PR ignorado:", username)
 				continue // Pula comentários feitos pelo autor do PR
+			}
+
+			// Verifica se o review comment foi feito após o merge do PR
+			if pr.MergedAt != nil && commentTime.After(pr.MergedAt.Time) {
+				fmt.Printf("    ❗ Review comment pós-merge ignorado: %s (comentário: %s, merge: %s)\n",
+					username, commentTime.Format("02/01/2006 15:04"), pr.MergedAt.Time.Format("02/01/2006 15:04"))
+				continue
 			}
 
 			// Determina a semana do comentário
@@ -421,17 +435,6 @@ func (pc *PRChampion) GenerateReport() {
 			}
 		}
 
-		// Campeão por comentários
-		if week.CommentWinner != "" {
-			fmt.Printf("💬 Campeão Comentários: %s\n", week.CommentWinner)
-			// Top 3 da semana por comentários
-			weekTopComments := pc.getTopUsersForWeek(week.UserComments, 3)
-			for i, user := range weekTopComments {
-				medal := []string{"🥇", "🥈", "🥉"}[i]
-				fmt.Printf("   %s %s: %d comentários\n", medal, user.Username, user.PRsCount) // PRsCount aqui representa o número de comentários
-			}
-		}
-
 		// Campeão por qualidade de comentários (pontuação ponderada)
 		if week.WeightedCommentWinner != "" {
 			fmt.Printf("⭐ Campeão Qualidade: %s\n", week.WeightedCommentWinner)
@@ -450,7 +453,7 @@ func (pc *PRChampion) GenerateReport() {
 	fmt.Println("🏅 RANKING GERAL POR PONTUAÇÃO:")
 	fmt.Println(strings.Repeat("=", 60))
 
-	topUsers := pc.getTopUsersByScore(3)
+	topUsers := pc.getTopUsersByScore(5)
 	for i, user := range topUsers {
 		position := i + 1
 		medal := ""
@@ -461,6 +464,10 @@ func (pc *PRChampion) GenerateReport() {
 			medal = "🥈"
 		case 3:
 			medal = "🥉"
+		case 4:
+			medal = "🏅"
+		case 5:
+			medal = "🎖️"
 		}
 
 		fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
@@ -473,7 +480,7 @@ func (pc *PRChampion) GenerateReport() {
 	fmt.Println("🏅 RANKING SEMANAL POR QUALIDADE DOS COMENTÁRIOS:")
 	fmt.Println(strings.Repeat("=", 60))
 
-	topWeightedCommentWeeklyUsers := pc.getTopUsersByWeightedCommentWeeklyScore(3)
+	topWeightedCommentWeeklyUsers := pc.getTopUsersByWeightedCommentWeeklyScore(5)
 	if len(topWeightedCommentWeeklyUsers) == 0 {
 		fmt.Println("   Nenhuma vitória semanal por qualidade de comentários foi registrada no período analisado.")
 	} else {
@@ -487,6 +494,10 @@ func (pc *PRChampion) GenerateReport() {
 				medal = "🥈"
 			case 3:
 				medal = "🥉"
+			case 4:
+				medal = "🏅"
+			case 5:
+				medal = "🎖️"
 			}
 
 			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
@@ -496,29 +507,29 @@ func (pc *PRChampion) GenerateReport() {
 		}
 	}
 
-	// Top 3 por número total de PRs
-	fmt.Println("📈 TOP 3 POR TOTAL DE PRS:")
+	// Top 5 por número total de PRs
+	fmt.Println("📈 TOP 5 POR TOTAL DE PRS:")
 	fmt.Println(strings.Repeat("=", 60))
 
-	topByPRs2 := pc.getTopUsersByPRs(3)
+	topByPRs2 := pc.getTopUsersByPRs(5)
 	for i, user := range topByPRs2 {
 		position := i + 1
-		medal := []string{"🥇", "🥈", "🥉"}[i]
+		medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
 		fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
 	}
 	fmt.Println()
 
-	// Top 3 por número total de comentários
-	fmt.Println("💬 TOP 3 POR TOTAL DE COMENTÁRIOS:")
+	// Top 5 por número total de comentários
+	fmt.Println("💬 TOP 5 POR TOTAL DE COMENTÁRIOS:")
 	fmt.Println(strings.Repeat("=", 60))
 
-	topByComments := pc.getTopUsersByComments(3)
+	topByComments := pc.getTopUsersByComments(5)
 	if len(topByComments) == 0 {
 		fmt.Println("   Nenhum comentário encontrado no período analisado.")
 	} else {
 		for i, user := range topByComments {
 			position := i + 1
-			medal := []string{"🥇", "🥈", "🥉"}[i]
+			medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
 			fmt.Printf("%s %d° lugar: %s - %d comentários\n", medal, position, user.Username, user.CommentsCount)
 		}
 	}
