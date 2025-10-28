@@ -520,17 +520,17 @@ func (pc *PRChampion) GenerateReport() {
 	fmt.Println()
 
 	// Top 5 por número total de comentários
-	fmt.Println("💬 TOP 5 POR TOTAL DE COMENTÁRIOS:")
+	fmt.Println("💬 TOP 5 POR QUALIDADE DE COMENTÁRIOS:")
 	fmt.Println(strings.Repeat("=", 60))
 
-	topByComments := pc.getTopUsersByComments(5)
+	topByComments := pc.getTopUsersByWeightedCommentScore(5)
 	if len(topByComments) == 0 {
 		fmt.Println("   Nenhum comentário encontrado no período analisado.")
 	} else {
 		for i, user := range topByComments {
 			position := i + 1
 			medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
-			fmt.Printf("%s %d° lugar: %s - %d comentários\n", medal, position, user.Username, user.CommentsCount)
+			fmt.Printf("%s %d° lugar: %s - %.2f comentários\n", medal, position, user.Username, user.WeightedCommentScore)
 		}
 	}
 	fmt.Println()
@@ -761,7 +761,7 @@ func (pc *PRChampion) calculateScoreFromReactions(reactions []*github.Reaction) 
 	for _, reaction := range reactions {
 		switch reaction.GetContent() {
 		case "+1": // 👍
-			score += 1.0 // +1 adicional (total = 2)
+			score += 2.0 // +2 adicional (total = 3)
 		case "-1": // 👎
 			score -= 2.0 // -2 para neutralizar o ponto base e ainda penalizar (-1)
 		case "heart", "hooray", "rocket": // ❤️ 🎉 🚀
