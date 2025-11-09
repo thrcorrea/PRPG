@@ -17,8 +17,9 @@ import (
 
 // Repository representa um repositório para análise
 type Repository struct {
-	Owner string
-	Name  string
+	Owner              string
+	Name               string
+	ProductionBranches []string // Lista de branches de produção aceitas (ex: [main, master, production])
 }
 
 // UserStats representa as estatísticas de um usuário
@@ -95,7 +96,12 @@ func (pc *PRChampion) FetchMergedPRs() error {
 	var allPRs []*github.PullRequest
 
 	for _, repo := range pc.repositories {
-		fmt.Printf("  📁 Analisando %s/%s...\n", repo.Owner, repo.Name)
+		productionBranches := repo.ProductionBranches
+		if len(productionBranches) == 0 {
+			productionBranches = []string{"main"} // Branch padrão se não especificada
+		}
+
+		fmt.Printf("  📁 Analisando %s/%s (branches: %s)...\n", repo.Owner, repo.Name, strings.Join(productionBranches, ", "))
 
 		repoPRs, err := pc.client.FetchPRsForRepo(repo.Owner, repo.Name, pc.startDate, pc.endDate)
 		if err != nil {
@@ -103,7 +109,33 @@ func (pc *PRChampion) FetchMergedPRs() error {
 			continue // Continua com os outros repositórios
 		}
 
-		allPRs = append(allPRs, repoPRs...)
+		// Filtra PRs mergeados apenas para as branches de produção
+		var productionPRs []*github.PullRequest
+		for _, pr := range repoPRs {
+			if pr.Base != nil && pr.Base.Ref != nil {
+				prBaseBranch := *pr.Base.Ref
+				isProductionBranch := false
+
+				for _, branch := range productionBranches {
+					if prBaseBranch == branch {
+						isProductionBranch = true
+						break
+					}
+				}
+
+				if isProductionBranch {
+					productionPRs = append(productionPRs, pr)
+				} else {
+					fmt.Printf("    ❌ PR #%d ignorado (branch: %s, aceitas: %s)\n",
+						pr.GetNumber(), prBaseBranch, strings.Join(productionBranches, ", "))
+				}
+			}
+		}
+
+		fmt.Printf("    ✅ %d PRs encontrados para branches de produção [%s] (total: %d)\n",
+			len(productionPRs), strings.Join(productionBranches, ", "), len(repoPRs))
+
+		allPRs = append(allPRs, productionPRs...)
 	}
 
 	fmt.Printf("📊 Encontrados %d PRs mergeados no período total\n", len(allPRs))
@@ -163,7 +195,7 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 			}
 
 			// Determina a semana do comentário
-			weekStart := getWeekStart(commentTime)
+			weekStart := getWeekStart(pr.MergedAt.Time)
 			weekKey := weekStart.Format("2006-01-02")
 
 			if weeklyComments[weekKey] == nil {
@@ -819,18 +851,56 @@ func parseDate(dateStr string) (time.Time, error) {
 }
 
 // parseRepositories converte strings de repositórios para slice de Repository
+// Formato aceito: owner/repo ou owner/repo:branch ou owner/repo:branch1|branch2|branch3
+// Suporta branches com barras: owner/repo:feat/rebrand-main|main
 func parseRepositories(repoStrings []string) ([]Repository, error) {
 	var repositories []Repository
 
 	for _, repoStr := range repoStrings {
-		parts := strings.Split(repoStr, "/")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("formato de repositório inválido: %s (use owner/repo)", repoStr)
+		// Primeiro encontra a posição do ':' para separar repo das branches
+		colonIndex := strings.Index(repoStr, ":")
+		var repoPath string
+		var productionBranches []string
+
+		if colonIndex != -1 {
+			repoPath = repoStr[:colonIndex]
+			branchesStr := strings.TrimSpace(repoStr[colonIndex+1:])
+
+			if branchesStr != "" {
+				// Divide por pipe (|) para múltiplas branches
+				branchList := strings.Split(branchesStr, "|")
+				for _, branch := range branchList {
+					branch = strings.TrimSpace(branch)
+					if branch != "" {
+						productionBranches = append(productionBranches, branch)
+					}
+				}
+			}
+		} else {
+			repoPath = repoStr
+		}
+
+		if len(productionBranches) == 0 {
+			productionBranches = []string{"main"}
+		}
+
+		// Divide owner/repo - só considera as primeiras duas partes separadas por '/'
+		slashIndex := strings.Index(repoPath, "/")
+		if slashIndex == -1 || slashIndex == len(repoPath)-1 {
+			return nil, fmt.Errorf("formato de repositório inválido: %s (use owner/repo ou owner/repo:branch1|branch2)", repoStr)
+		}
+
+		owner := strings.TrimSpace(repoPath[:slashIndex])
+		repo := strings.TrimSpace(repoPath[slashIndex+1:])
+
+		if owner == "" || repo == "" {
+			return nil, fmt.Errorf("formato de repositório inválido: %s (owner e repo não podem ser vazios)", repoStr)
 		}
 
 		repositories = append(repositories, Repository{
-			Owner: strings.TrimSpace(parts[0]),
-			Name:  strings.TrimSpace(parts[1]),
+			Owner:              owner,
+			Name:               repo,
+			ProductionBranches: productionBranches,
 		})
 	}
 
@@ -845,12 +915,20 @@ e gera relatórios com rankings baseados em pontuação semanal.
 
 Suporta análise de repositório único ou múltiplos repositórios simultaneamente.
 Cada semana, o usuário que mais teve PRs mergeados ganha 1 ponto.
-O ranking final mostra os top 3 usuários por pontuação total agregada.
+O ranking final mostra os top 5 usuários por pontuação total agregada.
+
+APENAS PRs mergeados para a branch de produção são considerados!
 
 Repositórios podem ser especificados via:
-  • Flag --repos: --repos microsoft/vscode,facebook/react
-  • Variável de ambiente: GITHUB_REPOS=microsoft/vscode,facebook/react
-  • Flags individuais: --owner microsoft --repo vscode`,
+  • Flag --repos: --repos microsoft/vscode:main|master,facebook/react:main
+  • Variável de ambiente: GITHUB_REPOS=microsoft/vscode:main|master,facebook/react:main
+  • Flags individuais: --owner microsoft --repo vscode (usa branch 'main' por padrão)
+
+Formato das branches de produção:
+  • owner/repo (usa 'main' como padrão)
+  • owner/repo:branch (especifica branch customizada)
+  • owner/repo:branch1|branch2|branch3 (múltiplas branches aceitas - separador |)
+  • owner/repo:feat/rebrand-main|main (suporta branches com barras)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Carrega variáveis do arquivo .env se existir
 		if err := godotenv.Load(); err != nil {
@@ -891,7 +969,7 @@ Repositórios podem ser especificados via:
 			}
 		} else if owner != "" && repo != "" {
 			// Usar repositório único (compatibilidade)
-			repositories = []Repository{{Owner: owner, Name: repo}}
+			repositories = []Repository{{Owner: owner, Name: repo, ProductionBranches: []string{"main"}}}
 		} else {
 			// Tentar ler da variável de ambiente GITHUB_REPOS
 			envRepos := os.Getenv("GITHUB_REPOS")
@@ -908,9 +986,9 @@ Repositórios podem ser especificados via:
 				fmt.Printf("📋 Usando repositórios da variável GITHUB_REPOS: %s\n", envRepos)
 			} else {
 				log.Fatal("❌ Especifique repositórios usando:\n" +
-					"   • --repos owner1/repo1,owner2/repo2\n" +
+					"   • --repos owner1/repo1:main|master,owner2/repo2\n" +
 					"   • --owner e --repo (repositório único)\n" +
-					"   • Variável GITHUB_REPOS=owner1/repo1,owner2/repo2")
+					"   • Variável GITHUB_REPOS=owner1/repo1:main|master,owner2/repo2")
 			}
 		}
 

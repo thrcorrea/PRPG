@@ -360,14 +360,14 @@ func TestGetWeekStart(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"2024-10-04", "2024-09-30"}, // Sexta -> Segunda anterior
-		{"2024-09-30", "2024-09-30"}, // Segunda -> Mesma segunda
-		{"2024-10-06", "2024-09-30"}, // Domingo -> Segunda anterior
-		{"2024-10-01", "2024-09-30"}, // Terça -> Segunda anterior
+		{"2024-10-04 13:00:00", "2024-09-30"}, // Sexta -> Segunda anterior
+		{"2024-09-30 10:00:00", "2024-09-30"}, // Segunda -> Mesma segunda
+		{"2024-10-06 09:00:00", "2024-09-30"}, // Domingo -> Segunda anterior
+		{"2024-10-01 14:00:00", "2024-09-30"}, // Terça -> Segunda anterior
 	}
 
 	for _, test := range tests {
-		inputTime, _ := time.Parse("2006-01-02", test.input)
+		inputTime, _ := time.Parse("2006-01-02 15:04:05", test.input)
 		result := getWeekStart(inputTime)
 
 		if result.Format("2006-01-02") != test.expected {
