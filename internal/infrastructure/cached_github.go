@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/go-github/v55/github"
+	"github.com/google/go-github/v70/github"
 	"github.com/thrcorrea/PRPG/internal/database"
 )
 

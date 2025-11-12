@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/go-github/v55/github"
+	"github.com/google/go-github/v70/github"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"github.com/thrcorrea/PRPG/internal/infrastructure"
@@ -205,7 +205,7 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 			}
 
 			// Calcula pontuação ponderada baseada nas reações
-			commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID())
+			commentScore := pc.calculateCommentScore(ctx, repoOwner, repoName, comment.GetID(), pr.MergedAt.Time)
 
 			weeklyComments[weekKey][username]++
 			weeklyWeightedComments[weekKey][username] += commentScore
@@ -240,7 +240,7 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 			}
 
 			// Determina a semana do comentário
-			weekStart := getWeekStart(commentTime)
+			weekStart := getWeekStart(pr.MergedAt.Time)
 			weekKey := weekStart.Format("2006-01-02")
 
 			if weeklyComments[weekKey] == nil {
@@ -250,7 +250,7 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 			}
 
 			// Calcula pontuação ponderada baseada nas reações
-			commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID())
+			commentScore := pc.calculateReviewCommentScore(ctx, repoOwner, repoName, comment.GetID(), pr.MergedAt.Time)
 
 			weeklyComments[weekKey][username]++
 			weeklyWeightedComments[weekKey][username] += commentScore
@@ -775,22 +775,25 @@ func isExcludedUser(username string) bool {
 }
 
 // calculateCommentScore calcula a pontuação de um comentário baseada em suas reações
-func (pc *PRChampion) calculateCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64) float64 {
+func (pc *PRChampion) calculateCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64, mergedAt time.Time) float64 {
 	// Busca as reações do comentário
 	reactions, err := pc.client.ListIssueCommentReactions(ctx, repoOwner, repoName, commentID)
 	if err != nil {
-		// Se não conseguir buscar reações, conta como 1 ponto normal
-		return 1.0
+		// Se não conseguir buscar reações, conta como 0 pontos
+		return 0
 	}
 
-	return pc.calculateScoreFromReactions(reactions)
+	return pc.calculateScoreFromReactions(reactions, mergedAt)
 }
 
 // calculateScoreFromReactions calcula a pontuação baseada em uma lista de reações
-func (pc *PRChampion) calculateScoreFromReactions(reactions []*github.Reaction) float64 {
+func (pc *PRChampion) calculateScoreFromReactions(reactions []*github.Reaction, mergedAt time.Time) float64 {
 	score := 1.0 // Pontuação base do comentário
 
 	for _, reaction := range reactions {
+		if reaction.GetCreatedAt().Time.After(mergedAt) {
+			continue // Ignora reações feitas após o merge do PR
+		}
 		switch reaction.GetContent() {
 		case "+1": // 👍
 			score += 2.0 // +2 adicional (total = 3)
@@ -812,7 +815,7 @@ func (pc *PRChampion) calculateScoreFromReactions(reactions []*github.Reaction) 
 }
 
 // calculateReviewCommentScore calcula a pontuação de um review comment baseada em suas reações
-func (pc *PRChampion) calculateReviewCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64) float64 {
+func (pc *PRChampion) calculateReviewCommentScore(ctx context.Context, repoOwner, repoName string, commentID int64, mergedAt time.Time) float64 {
 	// Busca as reações do review comment
 	reactions, err := pc.client.ListPullRequestCommentReactions(ctx, repoOwner, repoName, commentID)
 	if err != nil {
@@ -820,7 +823,7 @@ func (pc *PRChampion) calculateReviewCommentScore(ctx context.Context, repoOwner
 		return 1.0
 	}
 
-	return pc.calculateScoreFromReactions(reactions)
+	return pc.calculateScoreFromReactions(reactions, mergedAt)
 }
 
 // getWeekStart retorna o início da semana (segunda-feira)
@@ -867,7 +870,6 @@ func parseRepositories(repoStrings []string) ([]Repository, error) {
 			branchesStr := strings.TrimSpace(repoStr[colonIndex+1:])
 
 			if branchesStr != "" {
-				// Divide por pipe (|) para múltiplas branches
 				branchList := strings.Split(branchesStr, "|")
 				for _, branch := range branchList {
 					branch = strings.TrimSpace(branch)

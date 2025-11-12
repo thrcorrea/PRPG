@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-github/v55/github"
+	"github.com/google/go-github/v70/github"
 )
 
 func TestGetTopUsersByComments(t *testing.T) {
@@ -146,43 +146,55 @@ func TestGetTopUsersByComments(t *testing.T) {
 // TestCalculateCommentScore testa a função de cálculo de pontuação ponderada
 func TestCalculateCommentScore(t *testing.T) {
 	pc := &PRChampion{}
+	mergedAt := time.Now().Add(-24 * time.Hour) // PR foi mergeado há 1 dia
 
 	// Teste sem reações - score base
-	score1 := pc.calculateScoreFromReactions(nil)
+	score1 := pc.calculateScoreFromReactions(nil, mergedAt)
 	if score1 != 1.0 {
 		t.Errorf("Expected score 1.0 for no reactions, got %.1f", score1)
 	}
 
-	// Teste com thumbs up
+	// Teste com thumbs up (reações antes do merge)
 	thumbsUpReactions := []*github.Reaction{
-		{Content: github.String("+1")},
-		{Content: github.String("+1")},
+		{Content: github.String("+1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-1 * time.Hour)}},
+		{Content: github.String("+1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-2 * time.Hour)}},
 	}
-	score2 := pc.calculateScoreFromReactions(thumbsUpReactions)
-	if score2 != 3.0 { // 1.0 base + 2 * 1.0 thumbs up
-		t.Errorf("Expected score 3.0 for 2 thumbs up, got %.1f", score2)
+	score2 := pc.calculateScoreFromReactions(thumbsUpReactions, mergedAt)
+	if score2 != 5.0 { // 1.0 base + 2 * 2.0 thumbs up
+		t.Errorf("Expected score 5.0 for 2 thumbs up, got %.1f", score2)
 	}
 
 	// Teste com thumbs down
 	thumbsDownReactions := []*github.Reaction{
-		{Content: github.String("-1")},
+		{Content: github.String("-1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-1 * time.Hour)}},
 	}
-	score3 := pc.calculateScoreFromReactions(thumbsDownReactions)
+	score3 := pc.calculateScoreFromReactions(thumbsDownReactions, mergedAt)
 	if score3 != -1.0 { // 1.0 base - 2.0 thumbs down = -1.0 (min)
 		t.Errorf("Expected score -1.0 for 1 thumbs down, got %.1f", score3)
 	}
 
 	// Teste com reações mistas
 	mixedReactions := []*github.Reaction{
-		{Content: github.String("+1")},
-		{Content: github.String("-1")},
-		{Content: github.String("heart")},
-		{Content: github.String("laugh")},
+		{Content: github.String("+1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-1 * time.Hour)}},
+		{Content: github.String("-1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-2 * time.Hour)}},
+		{Content: github.String("heart"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-3 * time.Hour)}},
+		{Content: github.String("laugh"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-4 * time.Hour)}},
 	}
-	score4 := pc.calculateScoreFromReactions(mixedReactions)
-	expectedScore := 1.0 + 1.0 - 2.0 + 0.5 // = 0.5 (laugh não está mapeado, então não conta)
+	score4 := pc.calculateScoreFromReactions(mixedReactions, mergedAt)
+	expectedScore := 1.0 + 2.0 - 2.0 + 0.5 // = 1.5 (laugh não está mapeado, então não conta)
 	if score4 != expectedScore {
 		t.Errorf("Expected score %.1f for mixed reactions, got %.1f", expectedScore, score4)
+	}
+
+	// Teste com reações após o merge (devem ser ignoradas)
+	postMergeReactions := []*github.Reaction{
+		{Content: github.String("+1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(1 * time.Hour)}},  // Após merge
+		{Content: github.String("+1"), CreatedAt: &github.Timestamp{Time: mergedAt.Add(-1 * time.Hour)}}, // Antes merge
+	}
+	score5 := pc.calculateScoreFromReactions(postMergeReactions, mergedAt)
+	expectedScore5 := 1.0 + 2.0 // Apenas a reação antes do merge conta
+	if score5 != expectedScore5 {
+		t.Errorf("Expected score %.1f for post-merge reactions, got %.1f", expectedScore5, score5)
 	}
 }
 
@@ -561,9 +573,9 @@ func TestEnvironmentVariableRepos(t *testing.T) {
 	}
 
 	expected := []Repository{
-		{Owner: "microsoft", Name: "vscode"},
-		{Owner: "facebook", Name: "react"},
-		{Owner: "golang", Name: "go"},
+		{Owner: "microsoft", Name: "vscode", ProductionBranches: []string{"main"}},
+		{Owner: "facebook", Name: "react", ProductionBranches: []string{"main"}},
+		{Owner: "golang", Name: "go", ProductionBranches: []string{"main"}},
 	}
 
 	if len(repositories) != len(expected) {
@@ -573,6 +585,9 @@ func TestEnvironmentVariableRepos(t *testing.T) {
 	for i, repo := range repositories {
 		if repo.Owner != expected[i].Owner || repo.Name != expected[i].Name {
 			t.Errorf("Expected repo %v, got %v", expected[i], repo)
+		}
+		if len(repo.ProductionBranches) != len(expected[i].ProductionBranches) {
+			t.Errorf("Expected %d branches, got %d", len(expected[i].ProductionBranches), len(repo.ProductionBranches))
 		}
 	}
 }

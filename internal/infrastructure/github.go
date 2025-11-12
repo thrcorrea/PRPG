@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/go-github/v55/github"
-	"golang.org/x/oauth2"
+	"github.com/google/go-github/v70/github"
 )
 
 type GithubAdapter interface {
@@ -30,12 +29,7 @@ type githubAdapter struct {
 }
 
 func NewGithubClient(token string) GithubAdapter {
-	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: token},
-	)
-	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
+	client := github.NewClient(nil).WithAuthToken(token)
 
 	return &githubAdapter{client: client}
 }

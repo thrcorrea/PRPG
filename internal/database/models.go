@@ -3,7 +3,7 @@ package database
 import (
 	"time"
 
-	"github.com/google/go-github/v55/github"
+	"github.com/google/go-github/v70/github"
 )
 
 // CommentData representa um comentário armazenado no banco
