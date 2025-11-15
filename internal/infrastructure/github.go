@@ -15,6 +15,7 @@ type GithubAdapter interface {
 	ListPullRequestCommentReactions(ctx context.Context, owner, repo string, commentID int64) ([]*github.Reaction, error)
 	ListPRComments(ctx context.Context, owner, repo string, prNumber int) ([]*github.IssueComment, error)
 	ListPRReviewComments(ctx context.Context, owner, repo string, prNumber int) ([]*github.PullRequestComment, error)
+	ListPRReviews(ctx context.Context, owner, repo string, prNumber int) ([]*github.PullRequestReview, error)
 }
 
 // CacheableGithubAdapter estende GithubAdapter com funcionalidades de cache
@@ -144,4 +145,23 @@ func (c githubAdapter) ListPRReviewComments(ctx context.Context, owner, repo str
 		reviewOpts.Page = resp.NextPage
 	}
 	return comments, nil
+}
+
+func (c githubAdapter) ListPRReviews(ctx context.Context, owner, repo string, prNumber int) ([]*github.PullRequestReview, error) {
+	var reviews []*github.PullRequestReview
+	reviewOpts := &github.ListOptions{
+		PerPage: 100,
+	}
+	for {
+		revs, resp, err := c.client.PullRequests.ListReviews(ctx, owner, repo, prNumber, reviewOpts)
+		if err != nil {
+			return nil, err
+		}
+		reviews = append(reviews, revs...)
+		if resp.NextPage == 0 {
+			break
+		}
+		reviewOpts.Page = resp.NextPage
+	}
+	return reviews, nil
 }

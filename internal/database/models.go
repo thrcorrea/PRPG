@@ -32,6 +32,20 @@ type ReactionData struct {
 	CachedAt     time.Time `json:"cached_at"`
 }
 
+// ReviewData representa um review armazenado no banco
+type ReviewData struct {
+	ID          int64     `json:"id"`
+	RepoOwner   string    `json:"repo_owner"`
+	RepoName    string    `json:"repo_name"`
+	PRNumber    int       `json:"pr_number"`
+	ReviewID    int64     `json:"review_id"`
+	Username    string    `json:"username"`
+	State       string    `json:"state"` // "APPROVED", "REQUEST_CHANGES", "COMMENTED", "DISMISSED"
+	Body        string    `json:"body"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	CachedAt    time.Time `json:"cached_at"`
+}
+
 // PRData representa um PR armazenado no banco
 type PRData struct {
 	ID                    int64     `json:"id"`
@@ -44,9 +58,12 @@ type PRData struct {
 	HasComments           bool      `json:"has_comments"`            // Se tem comentários (issue ou review)
 	HasIssueComments      bool      `json:"has_issue_comments"`      // Se tem issue comments
 	HasReviewComments     bool      `json:"has_review_comments"`     // Se tem review comments
+	HasReviews            bool      `json:"has_reviews"`             // Se tem reviews
+	HasApprovedReviews    bool      `json:"has_approved_reviews"`    // Se tem pelo menos um review approved
 	CommentsChecked       bool      `json:"comments_checked"`        // Se os comentários já foram verificados
 	IssueCommentsChecked  bool      `json:"issue_comments_checked"`  // Se issue comments foram verificados
 	ReviewCommentsChecked bool      `json:"review_comments_checked"` // Se review comments foram verificados
+	ReviewsChecked        bool      `json:"reviews_checked"`         // Se reviews foram verificados
 	CachedAt              time.Time `json:"cached_at"`
 }
 
@@ -124,9 +141,32 @@ func FromGithubPR(pr *github.PullRequest, repoOwner, repoName string) *PRData {
 		HasComments:           false, // Será atualizado após verificação
 		HasIssueComments:      false, // Será atualizado após verificação
 		HasReviewComments:     false, // Será atualizado após verificação
+		HasReviews:            false, // Será atualizado após verificação
+		HasApprovedReviews:    false, // Será atualizado após verificação
 		CommentsChecked:       false, // Inicialmente não verificado
 		IssueCommentsChecked:  false, // Inicialmente não verificado
-		ReviewCommentsChecked: false, // Inicialmente não verificado
+		ReviewCommentsChecked: false, // Inicialmente não verificado  
+		ReviewsChecked:        false, // Inicialmente não verificado
 		CachedAt:              time.Now(),
+	}
+}
+
+// FromGithubReview converte um github.PullRequestReview para ReviewData
+func FromGithubReview(review *github.PullRequestReview, repoOwner, repoName string, prNumber int) *ReviewData {
+	var submittedAt time.Time
+	if review.SubmittedAt != nil {
+		submittedAt = review.SubmittedAt.Time
+	}
+
+	return &ReviewData{
+		RepoOwner:   repoOwner,
+		RepoName:    repoName,
+		PRNumber:    prNumber,
+		ReviewID:    review.GetID(),
+		Username:    review.User.GetLogin(),
+		State:       review.GetState(),
+		Body:        review.GetBody(),
+		SubmittedAt: submittedAt,
+		CachedAt:    time.Now(),
 	}
 }

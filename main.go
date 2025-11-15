@@ -142,13 +142,73 @@ func (pc *PRChampion) FetchMergedPRs() error {
 
 	pc.processWeeklyData(allPRs)
 
-	// Busca comentários para todos os PRs
+	// Busca reviews para todos os PRs e filtra apenas os PRs com approve
+	approvedPRs, err := pc.fetchReviewsAndFilterApprovedPRs(allPRs)
+	if err != nil {
+		fmt.Printf("⚠️  Erro ao buscar reviews: %v\n", err)
+		return err
+	}
+
+	fmt.Printf("📊 PRs com pelo menos um approve: %d de %d total\n", len(approvedPRs), len(allPRs))
+
+	// Substitui a lista de PRs pelos PRs aprovados
+	allPRs = approvedPRs
+	pc.processWeeklyData(allPRs)
+
+	// Busca comentários para todos os PRs aprovados
 	if err := pc.fetchCommentsForPRs(allPRs); err != nil {
 		fmt.Printf("⚠️  Erro ao buscar comentários: %v\n", err)
 	}
 	pc.calculateUserStats()
 
 	return nil
+}
+
+// fetchReviewsAndFilterApprovedPRs busca reviews dos PRs e retorna apenas os que têm pelo menos um approve
+func (pc *PRChampion) fetchReviewsAndFilterApprovedPRs(prs []*github.PullRequest) ([]*github.PullRequest, error) {
+	fmt.Printf("🔍 Buscando reviews dos PRs para filtrar apenas os aprovados...\n")
+
+	ctx := context.Background()
+	var approvedPRs []*github.PullRequest
+
+	for _, pr := range prs {
+		repoOwner := pr.Base.Repo.Owner.GetLogin()
+		repoName := pr.Base.Repo.GetName()
+		prNumber := pr.GetNumber()
+
+		// Busca reviews do PR
+		reviews, err := pc.client.ListPRReviews(ctx, repoOwner, repoName, prNumber)
+		if err != nil {
+			fmt.Printf("  ⚠️  Erro ao buscar reviews do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
+			continue
+		}
+
+		// Verifica se tem pelo menos um review aprovado
+		hasApprove := false
+		for _, review := range reviews {
+			if review.GetState() == "APPROVED" {
+				// Verifica se o review foi submetido antes do merge (se o PR foi mergeado)
+				if pr.MergedAt != nil && review.SubmittedAt != nil {
+					if review.SubmittedAt.Time.After(pr.MergedAt.Time) {
+						fmt.Printf("    ❗ Review approve pós-merge ignorado: %s (review: %s, merge: %s)\n",
+							review.User.GetLogin(), review.SubmittedAt.Time.Format("02/01/2006 15:04"), pr.MergedAt.Time.Format("02/01/2006 15:04"))
+						continue
+					}
+				}
+				hasApprove = true
+				break
+			}
+		}
+
+		// Só inclui o PR se tiver pelo menos um approve válido
+		if hasApprove {
+			approvedPRs = append(approvedPRs, pr)
+		} else {
+			fmt.Printf("    ❌ PR #%d em %s/%s ignorado (sem approve válido)\n", prNumber, repoOwner, repoName)
+		}
+	}
+
+	return approvedPRs, nil
 }
 
 // fetchCommentsForPRs busca comentários de todos os PRs
