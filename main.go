@@ -143,17 +143,17 @@ func (pc *PRChampion) FetchMergedPRs() error {
 	pc.processWeeklyData(allPRs)
 
 	// Busca reviews para todos os PRs e filtra apenas os PRs com approve
-	approvedPRs, err := pc.fetchReviewsAndFilterApprovedPRs(allPRs)
-	if err != nil {
-		fmt.Printf("⚠️  Erro ao buscar reviews: %v\n", err)
-		return err
-	}
+	// approvedPRs, err := pc.fetchReviewsAndFilterApprovedPRs(allPRs)
+	// if err != nil {
+	// 	fmt.Printf("⚠️  Erro ao buscar reviews: %v\n", err)
+	// 	return err
+	// }
 
-	fmt.Printf("📊 PRs com pelo menos um approve: %d de %d total\n", len(approvedPRs), len(allPRs))
+	// fmt.Printf("📊 PRs com pelo menos um approve: %d de %d total\n", len(approvedPRs), len(allPRs))
 
-	// Substitui a lista de PRs pelos PRs aprovados
-	allPRs = approvedPRs
-	pc.processWeeklyData(allPRs)
+	// // Substitui a lista de PRs pelos PRs aprovados
+	// allPRs = approvedPRs
+	// pc.processWeeklyData(allPRs)
 
 	// Busca comentários para todos os PRs aprovados
 	if err := pc.fetchCommentsForPRs(allPRs); err != nil {
@@ -1102,11 +1102,12 @@ Formato das branches de produção:
 
 		// Se a flag clear-database foi especificada, limpa o cache primeiro
 		if clearDatabase {
-			fmt.Println("🗑️  Limpando cache do banco de dados...")
+			fmt.Println("🗑️  Removendo todas as tabelas do banco de dados...")
 			if err := prChampion.ClearCache(); err != nil {
-				log.Fatalf("❌ Erro ao limpar cache: %v", err)
+				log.Fatalf("❌ Erro ao limpar banco: %v", err)
 			}
-			fmt.Println("✅ Cache limpo com sucesso!")
+			fmt.Println("✅ Banco de dados completamente limpo! As tabelas serão recriadas na próxima execução.")
+			return
 		}
 
 		if err := prChampion.FetchMergedPRs(); err != nil {
@@ -1127,7 +1128,7 @@ func init() {
 	rootCmd.Flags().StringP("start", "s", "", "Data de início (DD/MM/YYYY ou YYYY-MM-DD)")
 	rootCmd.Flags().StringP("end", "e", "", "Data de fim (DD/MM/YYYY ou YYYY-MM-DD)")
 	rootCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para analisar (alternativa às datas específicas)")
-	rootCmd.Flags().BoolP("clear-database", "c", false, "Limpa todo o cache do banco de dados antes de executar")
+	rootCmd.Flags().BoolP("clear-database", "c", false, "Remove completamente todas as tabelas do cache (serão recriadas na próxima execução)")
 }
 
 func main() {

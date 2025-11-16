@@ -747,34 +747,52 @@ func (db *sqliteDatabase) GetReviewsByPR(repoOwner, repoName string, prNumber in
 	return reviews, nil
 }
 
-// ClearDatabase limpa todos os dados do banco
+// ClearDatabase remove todas as tabelas do banco - elas serão recriadas na próxima execução
 func (db *sqliteDatabase) ClearDatabase() error {
-	// Remove todas as reações primeiro (por causa da foreign key)
-	if _, err := db.db.Exec("DELETE FROM reactions"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela reactions: %v", err)
+	// Lista das tabelas a serem removidas (ordem importante por causa das foreign keys)
+	tables := []string{
+		"reactions", // Primeiro por causa da foreign key para comments
+		"comments",
+		"reviews",
+		"prs",
 	}
 
-	// Remove todos os comentários
-	if _, err := db.db.Exec("DELETE FROM comments"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela comments: %v", err)
+	// Remove cada tabela individualmente
+	for _, table := range tables {
+		dropQuery := fmt.Sprintf("DROP TABLE IF EXISTS %s", table)
+		if _, err := db.db.Exec(dropQuery); err != nil {
+			return fmt.Errorf("erro ao remover tabela %s: %v", table, err)
+		}
+		fmt.Printf("🗑️  Tabela '%s' removida com sucesso\n", table)
 	}
 
-	// Remove todos os reviews
-	if _, err := db.db.Exec("DELETE FROM reviews"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela reviews: %v", err)
+	// Remove também os índices (SQLite remove automaticamente com as tabelas, mas vamos ser explícitos)
+	indices := []string{
+		"idx_comments_repo_pr",
+		"idx_comments_comment_id",
+		"idx_reactions_comment_id",
+		"idx_comments_cached_at",
+		"idx_prs_repo",
+		"idx_prs_repo_pr",
+		"idx_reviews_repo_pr",
+		"idx_reviews_review_id",
 	}
 
-	// Remove todos os PRs
-	if _, err := db.db.Exec("DELETE FROM prs"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela prs: %v", err)
+	for _, index := range indices {
+		dropIndexQuery := fmt.Sprintf("DROP INDEX IF EXISTS %s", index)
+		if _, err := db.db.Exec(dropIndexQuery); err != nil {
+			// Não é erro fatal se o índice não existir
+			fmt.Printf("⚠️  Aviso: Não foi possível remover índice %s: %v\n", index, err)
+		}
 	}
 
-	// Reset dos auto-increment
+	// Limpa a tabela de sequências do SQLite
 	if _, err := db.db.Exec("DELETE FROM sqlite_sequence WHERE name IN ('comments', 'reactions', 'reviews', 'prs')"); err != nil {
 		// Não é um erro fatal se a tabela sqlite_sequence não existir
-		fmt.Printf("⚠️  Aviso: Não foi possível resetar sequências: %v\n", err)
+		fmt.Printf("⚠️  Aviso: Não foi possível limpar sequências: %v\n", err)
 	}
 
+	fmt.Println("✅ Banco de dados completamente limpo - tabelas serão recriadas na próxima execução")
 	return nil
 }
 
