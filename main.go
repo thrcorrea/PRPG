@@ -263,7 +263,7 @@ func (pc *PRChampion) calculateCommentScoreFromDatabase(comment *database.Commen
 	for _, reaction := range reactions {
 		githubReaction := &github.Reaction{
 			Content:   &reaction.Content,
-			CreatedAt: &github.Timestamp{Time: reaction.CachedAt},
+			CreatedAt: &github.Timestamp{Time: reaction.CreatedAt},
 			User:      &github.User{Login: &reaction.Username},
 		}
 		githubReactions = append(githubReactions, githubReaction)

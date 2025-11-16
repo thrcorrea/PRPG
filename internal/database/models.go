@@ -29,6 +29,7 @@ type ReactionData struct {
 	ReactionType string    `json:"reaction_type"` // "issue_comment" ou "review_comment"
 	Content      string    `json:"content"`       // "+1", "-1", "heart", etc.
 	Username     string    `json:"username"`
+	CreatedAt    time.Time `json:"created_at"` // Data real de criação da reação
 	CachedAt     time.Time `json:"cached_at"`
 }
 
@@ -114,6 +115,7 @@ func FromGithubReaction(reaction *github.Reaction, commentID int64) *ReactionDat
 		ReactionType: "issue_comment",
 		Content:      reaction.GetContent(),
 		Username:     reaction.User.GetLogin(),
+		CreatedAt:    reaction.GetCreatedAt().Time,
 		CachedAt:     time.Now(),
 	}
 }
@@ -125,6 +127,7 @@ func FromGithubReviewReaction(reaction *github.Reaction, commentID int64) *React
 		ReactionType: "review_comment",
 		Content:      reaction.GetContent(),
 		Username:     reaction.User.GetLogin(),
+		CreatedAt:    reaction.GetCreatedAt().Time,
 		CachedAt:     time.Now(),
 	}
 }
@@ -145,7 +148,7 @@ func FromGithubPR(pr *github.PullRequest, repoOwner, repoName string) *PRData {
 		HasApprovedReviews:    false, // Será atualizado após verificação
 		CommentsChecked:       false, // Inicialmente não verificado
 		IssueCommentsChecked:  false, // Inicialmente não verificado
-		ReviewCommentsChecked: false, // Inicialmente não verificado  
+		ReviewCommentsChecked: false, // Inicialmente não verificado
 		ReviewsChecked:        false, // Inicialmente não verificado
 		CachedAt:              time.Now(),
 	}

@@ -129,6 +129,7 @@ func (db *sqliteDatabase) createTables() error {
 		reaction_type TEXT NOT NULL DEFAULT 'issue_comment',
 		content TEXT NOT NULL,
 		username TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
 		cached_at DATETIME NOT NULL,
 		FOREIGN KEY(comment_id) REFERENCES comments(comment_id),
 		UNIQUE(comment_id, reaction_type, content, username)
@@ -488,7 +489,7 @@ func (db *sqliteDatabase) MarkReactionsChecked(commentID int64) error {
 // GetReactions busca todas as reações de um comentário
 func (db *sqliteDatabase) GetReactions(commentID int64) ([]*ReactionData, error) {
 	query := `
-		SELECT id, comment_id, reaction_type, content, username, cached_at
+		SELECT id, comment_id, reaction_type, content, username, created_at, cached_at
 		FROM reactions 
 		WHERE comment_id = ?`
 
@@ -507,6 +508,7 @@ func (db *sqliteDatabase) GetReactions(commentID int64) ([]*ReactionData, error)
 			&reaction.ReactionType,
 			&reaction.Content,
 			&reaction.Username,
+			&reaction.CreatedAt,
 			&reaction.CachedAt,
 		)
 		if err != nil {
@@ -521,7 +523,7 @@ func (db *sqliteDatabase) GetReactions(commentID int64) ([]*ReactionData, error)
 // GetReactionsByType busca reações de um comentário por tipo específico
 func (db *sqliteDatabase) GetReactionsByType(commentID int64, reactionType string) ([]*ReactionData, error) {
 	query := `
-		SELECT id, comment_id, reaction_type, content, username, cached_at
+		SELECT id, comment_id, reaction_type, content, username, created_at, cached_at
 		FROM reactions 
 		WHERE comment_id = ? AND reaction_type = ?`
 
@@ -540,6 +542,7 @@ func (db *sqliteDatabase) GetReactionsByType(commentID int64, reactionType strin
 			&reaction.ReactionType,
 			&reaction.Content,
 			&reaction.Username,
+			&reaction.CreatedAt,
 			&reaction.CachedAt,
 		)
 		if err != nil {
@@ -555,14 +558,15 @@ func (db *sqliteDatabase) GetReactionsByType(commentID int64, reactionType strin
 func (db *sqliteDatabase) SaveReaction(reaction *ReactionData) error {
 	query := `
 		INSERT OR REPLACE INTO reactions 
-		(comment_id, reaction_type, content, username, cached_at)
-		VALUES (?, ?, ?, ?, ?)`
+		(comment_id, reaction_type, content, username, created_at, cached_at)
+		VALUES (?, ?, ?, ?, ?, ?)`
 
 	_, err := db.db.Exec(query,
 		reaction.CommentID,
 		reaction.ReactionType,
 		reaction.Content,
 		reaction.Username,
+		reaction.CreatedAt,
 		reaction.CachedAt,
 	)
 
@@ -589,8 +593,8 @@ func (db *sqliteDatabase) SaveReactions(reactions []*ReactionData) error {
 
 	query := `
 		INSERT OR REPLACE INTO reactions 
-		(comment_id, reaction_type, content, username, cached_at)
-		VALUES (?, ?, ?, ?, ?)`
+		(comment_id, reaction_type, content, username, created_at, cached_at)
+		VALUES (?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(query)
 	if err != nil {
@@ -604,6 +608,7 @@ func (db *sqliteDatabase) SaveReactions(reactions []*ReactionData) error {
 			reaction.ReactionType,
 			reaction.Content,
 			reaction.Username,
+			reaction.CreatedAt,
 			reaction.CachedAt,
 		)
 		if err != nil {
