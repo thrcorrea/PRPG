@@ -55,6 +55,17 @@ func (c *CachedGithubAdapter) ensurePRExists(ctx context.Context, owner, repo st
 		return fmt.Errorf("erro ao salvar PR completo: %v", err)
 	}
 
+	// Salva as labels do PR
+	if len(pr.Labels) > 0 {
+		var labelData []*database.PRLabelData
+		for _, label := range pr.Labels {
+			labelData = append(labelData, database.FromGithubLabel(label, owner, repo, prNumber))
+		}
+		if err := c.db.SavePRLabels(labelData); err != nil {
+			fmt.Printf("⚠️  Aviso: erro ao salvar labels do PR: %v\n", err)
+		}
+	}
+
 	return nil
 }
 

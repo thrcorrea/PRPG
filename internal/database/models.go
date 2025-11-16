@@ -65,7 +65,34 @@ type PRData struct {
 	IssueCommentsChecked  bool      `json:"issue_comments_checked"`  // Se issue comments foram verificados
 	ReviewCommentsChecked bool      `json:"review_comments_checked"` // Se review comments foram verificados
 	ReviewsChecked        bool      `json:"reviews_checked"`         // Se reviews foram verificados
+	Additions             int       `json:"additions"`               // Linhas adicionadas
+	Deletions             int       `json:"deletions"`               // Linhas removidas
+	ChangedFiles          int       `json:"changed_files"`           // Arquivos modificados
 	CachedAt              time.Time `json:"cached_at"`
+}
+
+// PRLabelData representa uma tag/label de um PR armazenada no banco
+// PRLabelData representa uma tag/label de um PR armazenada no banco
+type PRLabelData struct {
+	ID          int64  `json:"id"`
+	RepoOwner   string `json:"repo_owner"`
+	RepoName    string `json:"repo_name"`
+	PRNumber    int    `json:"pr_number"`
+	LabelName   string `json:"label_name"`
+	Color       string `json:"color"`       // Cor da label em hexadecimal
+	Description string `json:"description"` // Descrição da label
+}
+
+// FromGithubLabel converte um github.Label para PRLabelData
+func FromGithubLabel(label *github.Label, repoOwner, repoName string, prNumber int) *PRLabelData {
+	return &PRLabelData{
+		RepoOwner:   repoOwner,
+		RepoName:    repoName,
+		PRNumber:    prNumber,
+		LabelName:   label.GetName(),
+		Color:       label.GetColor(),
+		Description: label.GetDescription(),
+	}
 }
 
 // CommentWithReactions representa um comentário com suas reações
@@ -141,6 +168,9 @@ func FromGithubPR(pr *github.PullRequest, repoOwner, repoName string) *PRData {
 		Title:                 pr.GetTitle(),
 		Username:              pr.User.GetLogin(),
 		MergedAt:              pr.MergedAt.Time,
+		Additions:             pr.GetAdditions(),
+		Deletions:             pr.GetDeletions(),
+		ChangedFiles:          pr.GetChangedFiles(),
 		HasComments:           false, // Será atualizado após verificação
 		HasIssueComments:      false, // Será atualizado após verificação
 		HasReviewComments:     false, // Será atualizado após verificação

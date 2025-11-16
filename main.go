@@ -36,6 +36,9 @@ type UserStats struct {
 	WeightedCommentScore       float64        // Pontuação ponderada por reações (👍=+2, 👎=-1)
 	WeightedCommentWeeklyWins  int            // Vitórias semanais por qualidade de comentários
 	WeightedCommentWeeklyScore int            // Pontuação semanal por qualidade de comentários
+	TotalAdditions             int            // Total de linhas adicionadas
+	TotalDeletions             int            // Total de linhas removidas
+	TotalChangedFiles          int            // Total de arquivos modificados
 }
 
 // WeeklyData representa os dados de uma semana específica
@@ -172,10 +175,13 @@ func (pc *PRChampion) convertPRDataToGithubPR(prs []*database.PRData) []*github.
 
 		// Cria o PR com dados básicos necessários para processamento
 		githubPR := &github.PullRequest{
-			Number:   &pr.PRNumber,
-			Title:    &pr.Title,
-			User:     &github.User{Login: &pr.Username},
-			MergedAt: &github.Timestamp{Time: pr.MergedAt},
+			Number:       &pr.PRNumber,
+			Title:        &pr.Title,
+			User:         &github.User{Login: &pr.Username},
+			MergedAt:     &github.Timestamp{Time: pr.MergedAt},
+			Additions:    &pr.Additions,
+			Deletions:    &pr.Deletions,
+			ChangedFiles: &pr.ChangedFiles,
 			Base: &github.PullRequestBranch{
 				Repo: repo,
 			},
@@ -589,6 +595,19 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 
 		username := pr.User.GetLogin()
 		weeklyMap[weekKey][username]++
+
+		// Processa estatísticas de código diretamente aqui
+		if pc.userStats[username] == nil {
+			pc.userStats[username] = &UserStats{
+				Username:  username,
+				RepoStats: make(map[string]int),
+			}
+		}
+
+		stats := pc.userStats[username]
+		stats.TotalAdditions += pr.GetAdditions()
+		stats.TotalDeletions += pr.GetDeletions()
+		stats.TotalChangedFiles += pr.GetChangedFiles()
 	}
 
 	// Converte para slice de WeeklyData
@@ -811,6 +830,28 @@ func (pc *PRChampion) GenerateReport() {
 	}
 	fmt.Println()
 
+	// Top 5 por linhas de código
+	fmt.Println("💻 TOP 5 POR LINHAS DE CÓDIGO:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	topByCode := pc.getTopUsersByCodeLines(5)
+	if len(topByCode) == 0 {
+		fmt.Println("   Nenhuma estatística de código encontrada no período analisado.")
+	} else {
+		for i, user := range topByCode {
+			position := i + 1
+			medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
+			totalLines := user.TotalAdditions + user.TotalDeletions
+			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+			fmt.Printf("   📊 Total: %d linhas (+%d/-%d)\n", totalLines, user.TotalAdditions, user.TotalDeletions)
+			fmt.Printf("   📁 Arquivos modificados: %d\n", user.TotalChangedFiles)
+		}
+	}
+	fmt.Println()
+
+	// Labels mais utilizadas
+	pc.showLabelStatistics()
+
 	// Estatísticas do cache
 	fmt.Println("📈 ESTATÍSTICAS DO CACHE:")
 	fmt.Println(strings.Repeat("=", 60))
@@ -988,6 +1029,144 @@ func (pc *PRChampion) getTopUsersByWeightedCommentWeeklyScore(limit int) []*User
 	}
 
 	return users
+}
+
+// getTopUsersByCodeLines retorna os top usuários por total de linhas de código
+func (pc *PRChampion) getTopUsersByCodeLines(limit int) []*UserStats {
+	var users []*UserStats
+	for _, stats := range pc.userStats {
+		if stats.TotalAdditions > 0 || stats.TotalDeletions > 0 { // Apenas usuários com código
+			users = append(users, stats)
+		}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		totalI := users[i].TotalAdditions + users[i].TotalDeletions
+		totalJ := users[j].TotalAdditions + users[j].TotalDeletions
+		if totalI == totalJ {
+			return users[i].PRsCount > users[j].PRsCount // Desempate por número de PRs
+		}
+		return totalI > totalJ
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
+// showLabelStatistics exibe estatísticas das labels mais utilizadas nos PRs
+func (pc *PRChampion) showLabelStatistics() {
+	fmt.Println("🏷️  TOP 10 LABELS MAIS UTILIZADAS:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	// Para acessar dados do banco, precisamos usar o cached client
+	if pc.cachedClient == nil {
+		fmt.Println("   Estatísticas de labels não disponíveis (cache não inicializado)")
+		fmt.Println()
+		return
+	}
+
+	db := pc.cachedClient.GetDatabase()
+	labelStats, err := pc.getLabelStatistics(db)
+	if err != nil {
+		fmt.Printf("   Erro ao buscar estatísticas de labels: %v\n", err)
+		fmt.Println()
+		return
+	}
+
+	if len(labelStats) == 0 {
+		fmt.Println("   Nenhuma label encontrada nos PRs analisados.")
+		fmt.Println()
+		return
+	}
+
+	// Mostra top 10
+	limit := 10
+	if len(labelStats) < limit {
+		limit = len(labelStats)
+	}
+
+	for i := 0; i < limit; i++ {
+		label := labelStats[i]
+		position := i + 1
+		var emoji string
+		switch position {
+		case 1:
+			emoji = "🥇"
+		case 2:
+			emoji = "🥈"
+		case 3:
+			emoji = "🥉"
+		default:
+			emoji = "🏷️"
+		}
+		fmt.Printf("%s %d° lugar: %s (%d PRs)\n", emoji, position, label.Name, label.Count)
+	}
+	fmt.Println()
+}
+
+// LabelStats representa estatísticas de uma label
+type LabelStats struct {
+	Name  string
+	Count int
+	Color string
+}
+
+// getLabelStatistics busca estatísticas das labels do banco
+func (pc *PRChampion) getLabelStatistics(db database.CommentDatabase) ([]LabelStats, error) {
+	// Busca todas as labels dos PRs no período
+	var prs []*database.PRData
+	var err error
+
+	if !pc.startDate.IsZero() && !pc.endDate.IsZero() {
+		prs, err = db.GetAllPRsInDateRange(pc.startDate, pc.endDate)
+	} else {
+		prs, err = db.GetAllPRs()
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar PRs: %v", err)
+	}
+
+	// Conta labels por nome
+	labelCounts := make(map[string]int)
+	labelColors := make(map[string]string)
+
+	for _, pr := range prs {
+		labels, err := db.GetLabelsByPR(pr.RepoOwner, pr.RepoName, pr.PRNumber)
+		if err != nil {
+			continue // Continua mesmo com erro para não quebrar todo o relatório
+		}
+
+		for _, label := range labels {
+			labelCounts[label.LabelName]++
+			if labelColors[label.LabelName] == "" && label.Color != "" {
+				labelColors[label.LabelName] = label.Color
+			}
+		}
+	}
+
+	// Converte para slice e ordena
+	var stats []LabelStats
+	for name, count := range labelCounts {
+		stats = append(stats, LabelStats{
+			Name:  name,
+			Count: count,
+			Color: labelColors[name],
+		})
+	}
+
+	// Ordena por contagem decrescente
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Count == stats[j].Count {
+			return stats[i].Name < stats[j].Name // Desempate alfabético
+		}
+		return stats[i].Count > stats[j].Count
+	})
+
+	return stats, nil
 }
 
 // isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários

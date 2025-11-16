@@ -36,6 +36,10 @@ type CommentDatabase interface {
 	SaveReaction(reaction *ReactionData) error
 	SaveReactions(reactions []*ReactionData) error
 
+	// Labels/Tags
+	GetLabelsByPR(repoOwner, repoName string, prNumber int) ([]*PRLabelData, error)
+	SavePRLabels(labels []*PRLabelData) error
+
 	// Consultas para relatório
 	GetAllPRs() ([]*PRData, error)
 	GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error)
@@ -108,6 +112,9 @@ func (db *sqliteDatabase) createTables() error {
 		title TEXT NOT NULL,
 		username TEXT NOT NULL,
 		merged_at DATETIME NOT NULL,
+		additions INTEGER DEFAULT 0,
+		deletions INTEGER DEFAULT 0,
+		changed_files INTEGER DEFAULT 0,
 		has_comments BOOLEAN DEFAULT FALSE,
 		has_issue_comments BOOLEAN DEFAULT FALSE,
 		has_review_comments BOOLEAN DEFAULT FALSE,
@@ -151,6 +158,20 @@ func (db *sqliteDatabase) createTables() error {
 		UNIQUE(review_id)
 	);`
 
+	// Tabela de labels dos PRs
+	createPRLabelsTable := `
+	CREATE TABLE IF NOT EXISTS pr_labels (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_owner TEXT NOT NULL,
+		repo_name TEXT NOT NULL,
+		pr_number INTEGER NOT NULL,
+		label_name TEXT NOT NULL,
+		color TEXT,
+		description TEXT,
+		FOREIGN KEY(repo_owner, repo_name, pr_number) REFERENCES prs(repo_owner, repo_name, pr_number),
+		UNIQUE(repo_owner, repo_name, pr_number, label_name)
+	);`
+
 	// Índices para melhor performance
 	createIndexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_comments_repo_pr ON comments(repo_owner, repo_name, pr_number);`,
@@ -161,6 +182,8 @@ func (db *sqliteDatabase) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_prs_repo_pr ON prs(repo_owner, repo_name, pr_number);`,
 		`CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo_owner, repo_name, pr_number);`,
 		`CREATE INDEX IF NOT EXISTS idx_reviews_review_id ON reviews(review_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_labels_repo_pr ON pr_labels(repo_owner, repo_name, pr_number);`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_labels_name ON pr_labels(label_name);`,
 	}
 
 	// Executa criação das tabelas
@@ -178,6 +201,10 @@ func (db *sqliteDatabase) createTables() error {
 
 	if _, err := db.db.Exec(createReviewsTable); err != nil {
 		return fmt.Errorf("erro ao criar tabela reviews: %v", err)
+	}
+
+	if _, err := db.db.Exec(createPRLabelsTable); err != nil {
+		return fmt.Errorf("erro ao criar tabela pr_labels: %v", err)
 	}
 
 	// Executa criação dos índices
@@ -236,10 +263,10 @@ func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRDa
 func (db *sqliteDatabase) SavePR(pr *PRData) error {
 	query := `
 		INSERT OR REPLACE INTO prs 
-		(repo_owner, repo_name, pr_number, title, username, merged_at,
+		(repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
 		 has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		 comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := db.db.Exec(query,
 		pr.RepoOwner,
@@ -248,6 +275,9 @@ func (db *sqliteDatabase) SavePR(pr *PRData) error {
 		pr.Title,
 		pr.Username,
 		pr.MergedAt,
+		pr.Additions,
+		pr.Deletions,
+		pr.ChangedFiles,
 		pr.HasComments,
 		pr.HasIssueComments,
 		pr.HasReviewComments,
@@ -623,6 +653,95 @@ func (db *sqliteDatabase) SaveReactions(reactions []*ReactionData) error {
 	return nil
 }
 
+// GetLabelsByPR busca todas as labels de um PR
+func (db *sqliteDatabase) GetLabelsByPR(repoOwner, repoName string, prNumber int) ([]*PRLabelData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, label_name, color, description
+		FROM pr_labels 
+		WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
+
+	rows, err := db.db.Query(query, repoOwner, repoName, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar labels do PR: %v", err)
+	}
+	defer rows.Close()
+
+	var labels []*PRLabelData
+	for rows.Next() {
+		label := &PRLabelData{}
+		err := rows.Scan(
+			&label.ID,
+			&label.RepoOwner,
+			&label.RepoName,
+			&label.PRNumber,
+			&label.LabelName,
+			&label.Color,
+			&label.Description,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear label: %v", err)
+		}
+		labels = append(labels, label)
+	}
+
+	return labels, nil
+}
+
+// SavePRLabels salva múltiplas labels de um PR no banco
+func (db *sqliteDatabase) SavePRLabels(labels []*PRLabelData) error {
+	if len(labels) == 0 {
+		return nil
+	}
+
+	tx, err := db.db.Begin()
+	if err != nil {
+		return fmt.Errorf("erro ao iniciar transação: %v", err)
+	}
+	defer func() {
+		_ = tx.Rollback() // Ignore rollback errors
+	}()
+
+	// Primeiro, remove labels existentes do PR
+	if len(labels) > 0 {
+		deleteQuery := `DELETE FROM pr_labels WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
+		_, err = tx.Exec(deleteQuery, labels[0].RepoOwner, labels[0].RepoName, labels[0].PRNumber)
+		if err != nil {
+			return fmt.Errorf("erro ao limpar labels existentes: %v", err)
+		}
+	}
+
+	query := `
+		INSERT INTO pr_labels 
+		(repo_owner, repo_name, pr_number, label_name, color, description)
+		VALUES (?, ?, ?, ?, ?, ?)`
+
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		return fmt.Errorf("erro ao preparar statement: %v", err)
+	}
+	defer stmt.Close()
+
+	for _, label := range labels {
+		_, err := stmt.Exec(
+			label.RepoOwner,
+			label.RepoName,
+			label.PRNumber,
+			label.LabelName,
+			label.Color,
+			label.Description,
+		)
+		if err != nil {
+			return fmt.Errorf("erro ao salvar label: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("erro ao confirmar transação: %v", err)
+	}
+
+	return nil
+}
+
 // MarkPRReviewsChecked marca que os reviews de um PR foram verificados
 func (db *sqliteDatabase) MarkPRReviewsChecked(repoOwner, repoName string, prNumber int, hasReviews, hasApprovedReviews bool) error {
 	// Verifica se o PR já existe
@@ -761,7 +880,7 @@ func (db *sqliteDatabase) GetReviewsByPR(repoOwner, repoName string, prNumber in
 // GetAllPRs busca todos os PRs salvos no banco
 func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
 	query := `
-		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at,
+		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
 		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
 		FROM prs 
@@ -784,6 +903,9 @@ func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
 			&pr.Title,
 			&pr.Username,
 			&pr.MergedAt,
+			&pr.Additions,
+			&pr.Deletions,
+			&pr.ChangedFiles,
 			&pr.HasComments,
 			&pr.HasIssueComments,
 			&pr.HasReviewComments,
@@ -811,7 +933,7 @@ func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
 // GetAllPRsInDateRange busca PRs em um intervalo de datas específico
 func (db *sqliteDatabase) GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error) {
 	query := `
-		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at,
+		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
 		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
 		FROM prs 
@@ -835,6 +957,9 @@ func (db *sqliteDatabase) GetAllPRsInDateRange(startDate, endDate time.Time) ([]
 			&pr.Title,
 			&pr.Username,
 			&pr.MergedAt,
+			&pr.Additions,
+			&pr.Deletions,
+			&pr.ChangedFiles,
 			&pr.HasComments,
 			&pr.HasIssueComments,
 			&pr.HasReviewComments,
