@@ -36,6 +36,12 @@ type CommentDatabase interface {
 	SaveReaction(reaction *ReactionData) error
 	SaveReactions(reactions []*ReactionData) error
 
+	// Consultas para relatório
+	GetAllPRs() ([]*PRData, error)
+	GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error)
+	GetAllComments() ([]*CommentData, error)
+	GetAllCommentsInDateRange(startDate, endDate time.Time) ([]*CommentData, error)
+
 	// Utilitários
 	ClearDatabase() error
 	Close() error
@@ -745,6 +751,196 @@ func (db *sqliteDatabase) GetReviewsByPR(repoOwner, repoName string, prNumber in
 	}
 
 	return reviews, nil
+}
+
+// GetAllPRs busca todos os PRs salvos no banco
+func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at,
+		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
+		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
+		FROM prs 
+		ORDER BY merged_at DESC`
+
+	rows, err := db.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar todos os PRs: %v", err)
+	}
+	defer rows.Close()
+
+	var prs []*PRData
+	for rows.Next() {
+		pr := &PRData{}
+		err := rows.Scan(
+			&pr.ID,
+			&pr.RepoOwner,
+			&pr.RepoName,
+			&pr.PRNumber,
+			&pr.Title,
+			&pr.Username,
+			&pr.MergedAt,
+			&pr.HasComments,
+			&pr.HasIssueComments,
+			&pr.HasReviewComments,
+			&pr.HasReviews,
+			&pr.HasApprovedReviews,
+			&pr.CommentsChecked,
+			&pr.IssueCommentsChecked,
+			&pr.ReviewCommentsChecked,
+			&pr.ReviewsChecked,
+			&pr.CachedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear PR: %v", err)
+		}
+		prs = append(prs, pr)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos PRs: %v", err)
+	}
+
+	return prs, nil
+}
+
+// GetAllPRsInDateRange busca PRs em um intervalo de datas específico
+func (db *sqliteDatabase) GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at,
+		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
+		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
+		FROM prs 
+		WHERE merged_at >= ? AND merged_at <= ?
+		ORDER BY merged_at DESC`
+
+	rows, err := db.db.Query(query, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar PRs no intervalo de datas: %v", err)
+	}
+	defer rows.Close()
+
+	var prs []*PRData
+	for rows.Next() {
+		pr := &PRData{}
+		err := rows.Scan(
+			&pr.ID,
+			&pr.RepoOwner,
+			&pr.RepoName,
+			&pr.PRNumber,
+			&pr.Title,
+			&pr.Username,
+			&pr.MergedAt,
+			&pr.HasComments,
+			&pr.HasIssueComments,
+			&pr.HasReviewComments,
+			&pr.HasReviews,
+			&pr.HasApprovedReviews,
+			&pr.CommentsChecked,
+			&pr.IssueCommentsChecked,
+			&pr.ReviewCommentsChecked,
+			&pr.ReviewsChecked,
+			&pr.CachedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear PR: %v", err)
+		}
+		prs = append(prs, pr)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos PRs: %v", err)
+	}
+
+	return prs, nil
+}
+
+// GetAllComments busca todos os comentários salvos no banco
+func (db *sqliteDatabase) GetAllComments() ([]*CommentData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, comment_id, comment_type, 
+		       username, body, created_at, updated_at, cached_at, reactions_checked
+		FROM comments 
+		ORDER BY created_at ASC`
+
+	rows, err := db.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar todos os comentários: %v", err)
+	}
+	defer rows.Close()
+
+	var comments []*CommentData
+	for rows.Next() {
+		comment := &CommentData{}
+		err := rows.Scan(
+			&comment.ID,
+			&comment.RepoOwner,
+			&comment.RepoName,
+			&comment.PRNumber,
+			&comment.CommentID,
+			&comment.CommentType,
+			&comment.Username,
+			&comment.Body,
+			&comment.CreatedAt,
+			&comment.UpdatedAt,
+			&comment.CachedAt,
+			&comment.ReactionsChecked,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear comentário: %v", err)
+		}
+		comments = append(comments, comment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos comentários: %v", err)
+	}
+
+	return comments, nil
+}
+
+// GetAllCommentsInDateRange busca comentários em um intervalo de datas específico
+func (db *sqliteDatabase) GetAllCommentsInDateRange(startDate, endDate time.Time) ([]*CommentData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, comment_id, comment_type, 
+		       username, body, created_at, updated_at, cached_at, reactions_checked
+		FROM comments 
+		WHERE created_at >= ? AND created_at <= ?
+		ORDER BY created_at ASC`
+
+	rows, err := db.db.Query(query, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar comentários no intervalo de datas: %v", err)
+	}
+	defer rows.Close()
+
+	var comments []*CommentData
+	for rows.Next() {
+		comment := &CommentData{}
+		err := rows.Scan(
+			&comment.ID,
+			&comment.RepoOwner,
+			&comment.RepoName,
+			&comment.PRNumber,
+			&comment.CommentID,
+			&comment.CommentType,
+			&comment.Username,
+			&comment.Body,
+			&comment.CreatedAt,
+			&comment.UpdatedAt,
+			&comment.CachedAt,
+			&comment.ReactionsChecked,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear comentário: %v", err)
+		}
+		comments = append(comments, comment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos comentários: %v", err)
+	}
+
+	return comments, nil
 }
 
 // ClearDatabase remove todas as tabelas do banco - elas serão recriadas na próxima execução

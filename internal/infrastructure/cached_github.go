@@ -319,7 +319,7 @@ func (c *CachedGithubAdapter) ListPRReviews(ctx context.Context, owner, repo str
 		if err := c.db.SaveReview(reviewData); err != nil {
 			fmt.Printf("    ⚠️  Erro ao salvar review no cache: %v\n", err)
 		}
-		
+
 		// Verifica se tem pelo menos um review aprovado
 		if review.GetState() == "APPROVED" {
 			hasApprovedReviews = true
@@ -340,6 +340,11 @@ func (c *CachedGithubAdapter) ListPRReviews(ctx context.Context, owner, repo str
 func (c *CachedGithubAdapter) ClearCache() error {
 	fmt.Println("🗑️  Limpando cache do banco de dados...")
 	return c.db.ClearDatabase()
+}
+
+// GetDatabase retorna a instância do banco de dados para consultas diretas
+func (c *CachedGithubAdapter) GetDatabase() database.CommentDatabase {
+	return c.db
 }
 
 // Close fecha as conexões

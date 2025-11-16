@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/go-github/v70/github"
+	"github.com/thrcorrea/PRPG/internal/database"
 )
 
 type GithubAdapter interface {
@@ -23,6 +24,7 @@ type CacheableGithubAdapter interface {
 	GithubAdapter
 	ClearCache() error
 	Close() error
+	GetDatabase() database.CommentDatabase
 }
 
 type githubAdapter struct {
