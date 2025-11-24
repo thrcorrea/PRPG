@@ -205,6 +205,11 @@ func (pc *PRChampion) loadCommentsFromDatabase(prs []*database.PRData, db databa
 	totalComments := 0
 
 	for _, pr := range prs {
+		// Verifica se o PR deve ser ignorado para gamificação
+		if pc.shouldIgnorePRForGamification(pr.RepoOwner, pr.RepoName, pr.PRNumber) {
+			continue // Ignora comentários de PRs marcados para ignorar
+		}
+
 		// Busca comentários deste PR
 		comments, err := db.GetCommentsByPR(pr.RepoOwner, pr.RepoName, pr.PRNumber)
 		if err != nil {
@@ -417,6 +422,12 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 		repoOwner := pr.Base.Repo.Owner.GetLogin()
 		repoName := pr.Base.Repo.GetName()
 		prNumber := pr.GetNumber()
+
+		// Verifica se o PR deve ser ignorado para gamificação
+		if pc.shouldIgnorePRForGamification(repoOwner, repoName, prNumber) {
+			continue // Ignora comentários de PRs marcados para ignorar
+		}
+
 		comments, err := pc.client.ListPRComments(ctx, repoOwner, repoName, prNumber)
 		if err != nil {
 			fmt.Printf("  ⚠️  Erro ao buscar comentários do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
@@ -584,6 +595,15 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 	weekStarts := make(map[string]time.Time)
 
 	for _, pr := range prs {
+		// Verifica se o PR deve ser ignorado para gamificação
+		repoOwner := pr.Base.Repo.Owner.GetLogin()
+		repoName := pr.Base.Repo.GetName()
+		prNumber := pr.GetNumber()
+
+		if pc.shouldIgnorePRForGamification(repoOwner, repoName, prNumber) {
+			continue // Ignora este PR para a gamificação
+		}
+
 		mergedAt := pr.MergedAt.Time
 		weekStart := getWeekStart(mergedAt)
 		weekKey := weekStart.Format("2006-01-02")
@@ -1195,6 +1215,34 @@ func isExcludedUser(username string) bool {
 
 	// Verifica se termina com [bot] (padrão do GitHub para bots)
 	return strings.HasSuffix(usernameLower, "[bot]")
+}
+
+// shouldIgnorePRForGamification verifica se um PR deve ser ignorado para gamificação
+func (pc *PRChampion) shouldIgnorePRForGamification(repoOwner, repoName string, prNumber int) bool {
+	if pc.cachedClient == nil {
+		return false
+	}
+
+	db := pc.cachedClient.GetDatabase()
+	if db == nil {
+		return false
+	}
+
+	labels, err := db.GetLabelsByPR(repoOwner, repoName, prNumber)
+	if err != nil {
+		// Se houver erro ao buscar labels, não ignora o PR
+		return false
+	}
+
+	// Verifica se existe a label IGNORE_PR_GAMIFICATION
+	for _, label := range labels {
+		if label.LabelName == "IGNORE_PR_GAMIFICATION" {
+			fmt.Printf("    🚫 PR #%d ignorado para gamificação (label: IGNORE_PR_GAMIFICATION)\n", prNumber)
+			return true
+		}
+	}
+
+	return false
 }
 
 // calculateCommentScore calcula a pontuação de um comentário baseada em suas reações
