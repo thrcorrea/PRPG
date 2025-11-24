@@ -12,6 +12,7 @@ import (
 	"github.com/google/go-github/v70/github"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
+	"github.com/thrcorrea/PRPG/internal/database"
 	"github.com/thrcorrea/PRPG/internal/infrastructure"
 )
 
@@ -35,6 +36,9 @@ type UserStats struct {
 	WeightedCommentScore       float64        // Pontuação ponderada por reações (👍=+2, 👎=-1)
 	WeightedCommentWeeklyWins  int            // Vitórias semanais por qualidade de comentários
 	WeightedCommentWeeklyScore int            // Pontuação semanal por qualidade de comentários
+	TotalAdditions             int            // Total de linhas adicionadas
+	TotalDeletions             int            // Total de linhas removidas
+	TotalChangedFiles          int            // Total de arquivos modificados
 }
 
 // WeeklyData representa os dados de uma semana específica
@@ -80,12 +84,203 @@ func NewPRChampion(token string, repositories []Repository, startDate, endDate t
 	}, nil
 }
 
+// NewPRChampionFromDatabase cria uma instância do PR Champion apenas para acessar banco de dados
+func NewPRChampionFromDatabase(startDate, endDate time.Time) (*PRChampion, error) {
+	// Cria cliente com cache apenas para acesso ao banco (sem token da API)
+	cachedClient, err := infrastructure.NewCachedGithubAdapter("", "./data/comments.db")
+	if err != nil {
+		return nil, fmt.Errorf("erro ao criar acesso ao banco: %v", err)
+	}
+
+	return &PRChampion{
+		client:       cachedClient,
+		cachedClient: cachedClient,
+		repositories: []Repository{}, // Será carregado do banco
+		startDate:    startDate,
+		endDate:      endDate,
+		weeklyData:   []WeeklyData{},
+		userStats:    make(map[string]*UserStats),
+	}, nil
+}
+
 // ClearCache limpa todo o cache do banco de dados
 func (pc *PRChampion) ClearCache() error {
 	if pc.cachedClient == nil {
 		return fmt.Errorf("cliente com cache não está disponível")
 	}
 	return pc.cachedClient.ClearCache()
+}
+
+// LoadDataFromDatabase carrega dados já salvos no banco e processa para gerar relatórios
+func (pc *PRChampion) LoadDataFromDatabase() error {
+	fmt.Printf("📊 Carregando dados do banco de dados...\n")
+
+	// Acessa o banco de dados através do client
+	db := pc.cachedClient.GetDatabase()
+
+	// Busca todos os PRs ou filtra por data se especificado
+	var prs []*database.PRData
+	var err error
+
+	if !pc.startDate.IsZero() && !pc.endDate.IsZero() {
+		fmt.Printf("🔍 Filtrando PRs entre %s e %s\n",
+			pc.startDate.Format("02/01/2006"), pc.endDate.Format("02/01/2006"))
+		prs, err = db.GetAllPRsInDateRange(pc.startDate, pc.endDate)
+	} else {
+		fmt.Printf("📋 Carregando todos os PRs salvos\n")
+		prs, err = db.GetAllPRs()
+	}
+
+	if err != nil {
+		return fmt.Errorf("erro ao carregar PRs do banco: %v", err)
+	}
+
+	if len(prs) == 0 {
+		fmt.Printf("⚠️  Nenhum PR encontrado no banco de dados\n")
+		fmt.Printf("💡 Use o comando 'load' primeiro para carregar dados da API do GitHub\n")
+		return nil
+	}
+
+	fmt.Printf("📊 Encontrados %d PRs no banco de dados\n", len(prs))
+
+	// Converte PRData para github.PullRequest para reutilizar lógica existente
+	githubPRs := pc.convertPRDataToGithubPR(prs)
+
+	// Processa dados semanais dos PRs
+	pc.processWeeklyData(githubPRs)
+
+	// Carrega e processa comentários
+	err = pc.loadCommentsFromDatabase(prs, db)
+	if err != nil {
+		fmt.Printf("⚠️  Erro ao carregar comentários: %v\n", err)
+	}
+
+	// Calcula estatísticas dos usuários
+	pc.calculateUserStats()
+
+	fmt.Printf("✅ Dados carregados com sucesso do banco!\n")
+	return nil
+}
+
+// convertPRDataToGithubPR converte PRData do banco para github.PullRequest
+func (pc *PRChampion) convertPRDataToGithubPR(prs []*database.PRData) []*github.PullRequest {
+	var githubPRs []*github.PullRequest
+
+	for _, pr := range prs {
+		// Cria um repositório para manter referências
+		repo := &github.Repository{
+			Owner: &github.User{Login: &pr.RepoOwner},
+			Name:  &pr.RepoName,
+		}
+
+		// Cria o PR com dados básicos necessários para processamento
+		githubPR := &github.PullRequest{
+			Number:       &pr.PRNumber,
+			Title:        &pr.Title,
+			User:         &github.User{Login: &pr.Username},
+			MergedAt:     &github.Timestamp{Time: pr.MergedAt},
+			Additions:    &pr.Additions,
+			Deletions:    &pr.Deletions,
+			ChangedFiles: &pr.ChangedFiles,
+			Base: &github.PullRequestBranch{
+				Repo: repo,
+			},
+		}
+
+		githubPRs = append(githubPRs, githubPR)
+	}
+
+	return githubPRs
+}
+
+// loadCommentsFromDatabase carrega comentários do banco e processa pontuações
+func (pc *PRChampion) loadCommentsFromDatabase(prs []*database.PRData, db database.CommentDatabase) error {
+	fmt.Printf("💬 Carregando comentários do banco de dados...\n")
+
+	// Mapas para rastrear comentários por semana
+	weeklyComments := make(map[string]map[string]int)             // weekKey -> username -> count
+	weeklyWeightedComments := make(map[string]map[string]float64) // weekKey -> username -> weighted score
+	weekStarts := make(map[string]time.Time)
+
+	totalComments := 0
+
+	for _, pr := range prs {
+		// Verifica se o PR deve ser ignorado para gamificação
+		if pc.shouldIgnorePRForGamification(pr.RepoOwner, pr.RepoName, pr.PRNumber) {
+			continue // Ignora comentários de PRs marcados para ignorar
+		}
+
+		// Busca comentários deste PR
+		comments, err := db.GetCommentsByPR(pr.RepoOwner, pr.RepoName, pr.PRNumber)
+		if err != nil {
+			fmt.Printf("  ⚠️  Erro ao buscar comentários do PR #%d: %v\n", pr.PRNumber, err)
+			continue
+		}
+
+		for _, comment := range comments {
+			// Filtra usuários excluídos (bots, etc.)
+			if isExcludedUser(comment.Username) {
+				continue
+			}
+
+			// Pula comentários do autor do PR
+			if comment.Username == pr.Username {
+				continue
+			}
+
+			// Verifica se o comentário foi feito após o merge (se aplicável)
+			if comment.CreatedAt.After(pr.MergedAt) {
+				fmt.Printf("    ❗ Comentário pós-merge ignorado: %s\n", comment.Username)
+				continue
+			}
+
+			// Determina a semana do comentário baseada no merge do PR
+			weekStart := getWeekStart(pr.MergedAt)
+			weekKey := weekStart.Format("2006-01-02")
+
+			if weeklyComments[weekKey] == nil {
+				weeklyComments[weekKey] = make(map[string]int)
+				weeklyWeightedComments[weekKey] = make(map[string]float64)
+				weekStarts[weekKey] = weekStart
+			}
+
+			// Calcula pontuação ponderada baseada nas reações salvas
+			commentScore := pc.calculateCommentScoreFromDatabase(comment, db, pr.MergedAt)
+
+			weeklyComments[weekKey][comment.Username]++
+			weeklyWeightedComments[weekKey][comment.Username] += commentScore
+			totalComments++
+		}
+	}
+
+	// Processa comentários semanais
+	pc.processWeeklyComments(weeklyComments, weeklyWeightedComments, weekStarts)
+
+	fmt.Printf("� Total de comentários processados: %d\n", totalComments)
+	return nil
+}
+
+// calculateCommentScoreFromDatabase calcula pontuação usando reações do banco
+func (pc *PRChampion) calculateCommentScoreFromDatabase(comment *database.CommentData, db database.CommentDatabase, mergedAt time.Time) float64 {
+	// Busca reações do comentário no banco
+	reactions, err := db.GetReactions(comment.CommentID)
+	if err != nil {
+		// Se não conseguir buscar reações, usa pontuação base
+		return 1.0
+	}
+
+	// Converte ReactionData para github.Reaction para reutilizar lógica
+	githubReactions := make([]*github.Reaction, 0, len(reactions))
+	for _, reaction := range reactions {
+		githubReaction := &github.Reaction{
+			Content:   &reaction.Content,
+			CreatedAt: &github.Timestamp{Time: reaction.CreatedAt},
+			User:      &github.User{Login: &reaction.Username},
+		}
+		githubReactions = append(githubReactions, githubReaction)
+	}
+
+	return pc.calculateScoreFromReactions(githubReactions, mergedAt)
 }
 
 // FetchMergedPRs busca todos os PRs mergeados no período especificado para todos os repositórios
@@ -142,13 +337,73 @@ func (pc *PRChampion) FetchMergedPRs() error {
 
 	pc.processWeeklyData(allPRs)
 
-	// Busca comentários para todos os PRs
+	// Busca reviews para todos os PRs e filtra apenas os PRs com approve
+	// approvedPRs, err := pc.fetchReviewsAndFilterApprovedPRs(allPRs)
+	// if err != nil {
+	// 	fmt.Printf("⚠️  Erro ao buscar reviews: %v\n", err)
+	// 	return err
+	// }
+
+	// fmt.Printf("📊 PRs com pelo menos um approve: %d de %d total\n", len(approvedPRs), len(allPRs))
+
+	// // Substitui a lista de PRs pelos PRs aprovados
+	// allPRs = approvedPRs
+	// pc.processWeeklyData(allPRs)
+
+	// Busca comentários para todos os PRs aprovados
 	if err := pc.fetchCommentsForPRs(allPRs); err != nil {
 		fmt.Printf("⚠️  Erro ao buscar comentários: %v\n", err)
 	}
 	pc.calculateUserStats()
 
 	return nil
+}
+
+// fetchReviewsAndFilterApprovedPRs busca reviews dos PRs e retorna apenas os que têm pelo menos um approve
+func (pc *PRChampion) fetchReviewsAndFilterApprovedPRs(prs []*github.PullRequest) ([]*github.PullRequest, error) {
+	fmt.Printf("🔍 Buscando reviews dos PRs para filtrar apenas os aprovados...\n")
+
+	ctx := context.Background()
+	var approvedPRs []*github.PullRequest
+
+	for _, pr := range prs {
+		repoOwner := pr.Base.Repo.Owner.GetLogin()
+		repoName := pr.Base.Repo.GetName()
+		prNumber := pr.GetNumber()
+
+		// Busca reviews do PR
+		reviews, err := pc.client.ListPRReviews(ctx, repoOwner, repoName, prNumber)
+		if err != nil {
+			fmt.Printf("  ⚠️  Erro ao buscar reviews do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
+			continue
+		}
+
+		// Verifica se tem pelo menos um review aprovado
+		hasApprove := false
+		for _, review := range reviews {
+			if review.GetState() == "APPROVED" {
+				// Verifica se o review foi submetido antes do merge (se o PR foi mergeado)
+				if pr.MergedAt != nil && review.SubmittedAt != nil {
+					if review.SubmittedAt.Time.After(pr.MergedAt.Time) {
+						fmt.Printf("    ❗ Review approve pós-merge ignorado: %s (review: %s, merge: %s)\n",
+							review.User.GetLogin(), review.SubmittedAt.Time.Format("02/01/2006 15:04"), pr.MergedAt.Time.Format("02/01/2006 15:04"))
+						continue
+					}
+				}
+				hasApprove = true
+				break
+			}
+		}
+
+		// Só inclui o PR se tiver pelo menos um approve válido
+		if hasApprove {
+			approvedPRs = append(approvedPRs, pr)
+		} else {
+			fmt.Printf("    ❌ PR #%d em %s/%s ignorado (sem approve válido)\n", prNumber, repoOwner, repoName)
+		}
+	}
+
+	return approvedPRs, nil
 }
 
 // fetchCommentsForPRs busca comentários de todos os PRs
@@ -167,6 +422,12 @@ func (pc *PRChampion) fetchCommentsForPRs(prs []*github.PullRequest) error {
 		repoOwner := pr.Base.Repo.Owner.GetLogin()
 		repoName := pr.Base.Repo.GetName()
 		prNumber := pr.GetNumber()
+
+		// Verifica se o PR deve ser ignorado para gamificação
+		if pc.shouldIgnorePRForGamification(repoOwner, repoName, prNumber) {
+			continue // Ignora comentários de PRs marcados para ignorar
+		}
+
 		comments, err := pc.client.ListPRComments(ctx, repoOwner, repoName, prNumber)
 		if err != nil {
 			fmt.Printf("  ⚠️  Erro ao buscar comentários do PR #%d em %s/%s: %v\n", prNumber, repoOwner, repoName, err)
@@ -334,6 +595,15 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 	weekStarts := make(map[string]time.Time)
 
 	for _, pr := range prs {
+		// Verifica se o PR deve ser ignorado para gamificação
+		repoOwner := pr.Base.Repo.Owner.GetLogin()
+		repoName := pr.Base.Repo.GetName()
+		prNumber := pr.GetNumber()
+
+		if pc.shouldIgnorePRForGamification(repoOwner, repoName, prNumber) {
+			continue // Ignora este PR para a gamificação
+		}
+
 		mergedAt := pr.MergedAt.Time
 		weekStart := getWeekStart(mergedAt)
 		weekKey := weekStart.Format("2006-01-02")
@@ -345,6 +615,19 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 
 		username := pr.User.GetLogin()
 		weeklyMap[weekKey][username]++
+
+		// Processa estatísticas de código diretamente aqui
+		if pc.userStats[username] == nil {
+			pc.userStats[username] = &UserStats{
+				Username:  username,
+				RepoStats: make(map[string]int),
+			}
+		}
+
+		stats := pc.userStats[username]
+		stats.TotalAdditions += pr.GetAdditions()
+		stats.TotalDeletions += pr.GetDeletions()
+		stats.TotalChangedFiles += pr.GetChangedFiles()
 	}
 
 	// Converte para slice de WeeklyData
@@ -567,6 +850,28 @@ func (pc *PRChampion) GenerateReport() {
 	}
 	fmt.Println()
 
+	// Top 5 por linhas de código
+	fmt.Println("💻 TOP 5 POR LINHAS DE CÓDIGO:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	topByCode := pc.getTopUsersByCodeLines(5)
+	if len(topByCode) == 0 {
+		fmt.Println("   Nenhuma estatística de código encontrada no período analisado.")
+	} else {
+		for i, user := range topByCode {
+			position := i + 1
+			medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
+			totalLines := user.TotalAdditions + user.TotalDeletions
+			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+			fmt.Printf("   📊 Total: %d linhas (+%d/-%d)\n", totalLines, user.TotalAdditions, user.TotalDeletions)
+			fmt.Printf("   📁 Arquivos modificados: %d\n", user.TotalChangedFiles)
+		}
+	}
+	fmt.Println()
+
+	// Labels mais utilizadas
+	pc.showLabelStatistics()
+
 	// Estatísticas do cache
 	fmt.Println("📈 ESTATÍSTICAS DO CACHE:")
 	fmt.Println(strings.Repeat("=", 60))
@@ -746,6 +1051,144 @@ func (pc *PRChampion) getTopUsersByWeightedCommentWeeklyScore(limit int) []*User
 	return users
 }
 
+// getTopUsersByCodeLines retorna os top usuários por total de linhas de código
+func (pc *PRChampion) getTopUsersByCodeLines(limit int) []*UserStats {
+	var users []*UserStats
+	for _, stats := range pc.userStats {
+		if stats.TotalAdditions > 0 || stats.TotalDeletions > 0 { // Apenas usuários com código
+			users = append(users, stats)
+		}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		totalI := users[i].TotalAdditions + users[i].TotalDeletions
+		totalJ := users[j].TotalAdditions + users[j].TotalDeletions
+		if totalI == totalJ {
+			return users[i].PRsCount > users[j].PRsCount // Desempate por número de PRs
+		}
+		return totalI > totalJ
+	})
+
+	if len(users) > limit {
+		users = users[:limit]
+	}
+
+	return users
+}
+
+// showLabelStatistics exibe estatísticas das labels mais utilizadas nos PRs
+func (pc *PRChampion) showLabelStatistics() {
+	fmt.Println("🏷️  TOP 10 LABELS MAIS UTILIZADAS:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	// Para acessar dados do banco, precisamos usar o cached client
+	if pc.cachedClient == nil {
+		fmt.Println("   Estatísticas de labels não disponíveis (cache não inicializado)")
+		fmt.Println()
+		return
+	}
+
+	db := pc.cachedClient.GetDatabase()
+	labelStats, err := pc.getLabelStatistics(db)
+	if err != nil {
+		fmt.Printf("   Erro ao buscar estatísticas de labels: %v\n", err)
+		fmt.Println()
+		return
+	}
+
+	if len(labelStats) == 0 {
+		fmt.Println("   Nenhuma label encontrada nos PRs analisados.")
+		fmt.Println()
+		return
+	}
+
+	// Mostra top 10
+	limit := 10
+	if len(labelStats) < limit {
+		limit = len(labelStats)
+	}
+
+	for i := 0; i < limit; i++ {
+		label := labelStats[i]
+		position := i + 1
+		var emoji string
+		switch position {
+		case 1:
+			emoji = "🥇"
+		case 2:
+			emoji = "🥈"
+		case 3:
+			emoji = "🥉"
+		default:
+			emoji = "🏷️"
+		}
+		fmt.Printf("%s %d° lugar: %s (%d PRs)\n", emoji, position, label.Name, label.Count)
+	}
+	fmt.Println()
+}
+
+// LabelStats representa estatísticas de uma label
+type LabelStats struct {
+	Name  string
+	Count int
+	Color string
+}
+
+// getLabelStatistics busca estatísticas das labels do banco
+func (pc *PRChampion) getLabelStatistics(db database.CommentDatabase) ([]LabelStats, error) {
+	// Busca todas as labels dos PRs no período
+	var prs []*database.PRData
+	var err error
+
+	if !pc.startDate.IsZero() && !pc.endDate.IsZero() {
+		prs, err = db.GetAllPRsInDateRange(pc.startDate, pc.endDate)
+	} else {
+		prs, err = db.GetAllPRs()
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar PRs: %v", err)
+	}
+
+	// Conta labels por nome
+	labelCounts := make(map[string]int)
+	labelColors := make(map[string]string)
+
+	for _, pr := range prs {
+		labels, err := db.GetLabelsByPR(pr.RepoOwner, pr.RepoName, pr.PRNumber)
+		if err != nil {
+			continue // Continua mesmo com erro para não quebrar todo o relatório
+		}
+
+		for _, label := range labels {
+			labelCounts[label.LabelName]++
+			if labelColors[label.LabelName] == "" && label.Color != "" {
+				labelColors[label.LabelName] = label.Color
+			}
+		}
+	}
+
+	// Converte para slice e ordena
+	var stats []LabelStats
+	for name, count := range labelCounts {
+		stats = append(stats, LabelStats{
+			Name:  name,
+			Count: count,
+			Color: labelColors[name],
+		})
+	}
+
+	// Ordena por contagem decrescente
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Count == stats[j].Count {
+			return stats[i].Name < stats[j].Name // Desempate alfabético
+		}
+		return stats[i].Count > stats[j].Count
+	})
+
+	return stats, nil
+}
+
 // isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários
 func isExcludedUser(username string) bool {
 	excludedUsers := []string{
@@ -772,6 +1215,34 @@ func isExcludedUser(username string) bool {
 
 	// Verifica se termina com [bot] (padrão do GitHub para bots)
 	return strings.HasSuffix(usernameLower, "[bot]")
+}
+
+// shouldIgnorePRForGamification verifica se um PR deve ser ignorado para gamificação
+func (pc *PRChampion) shouldIgnorePRForGamification(repoOwner, repoName string, prNumber int) bool {
+	if pc.cachedClient == nil {
+		return false
+	}
+
+	db := pc.cachedClient.GetDatabase()
+	if db == nil {
+		return false
+	}
+
+	labels, err := db.GetLabelsByPR(repoOwner, repoName, prNumber)
+	if err != nil {
+		// Se houver erro ao buscar labels, não ignora o PR
+		return false
+	}
+
+	// Verifica se existe a label IGNORE_PR_GAMIFICATION
+	for _, label := range labels {
+		if label.LabelName == "IGNORE_PR_GAMIFICATION" {
+			fmt.Printf("    🚫 PR #%d ignorado para gamificação (label: IGNORE_PR_GAMIFICATION)\n", prNumber)
+			return true
+		}
+	}
+
+	return false
 }
 
 // calculateCommentScore calcula a pontuação de um comentário baseada em suas reações
@@ -915,9 +1386,23 @@ var rootCmd = &cobra.Command{
 	Long: `PR Champion é uma ferramenta CLI que analisa PRs mergeados em repositórios GitHub
 e gera relatórios com rankings baseados em pontuação semanal.
 
-Suporta análise de repositório único ou múltiplos repositórios simultaneamente.
-Cada semana, o usuário que mais teve PRs mergeados ganha 1 ponto.
-O ranking final mostra os top 5 usuários por pontuação total agregada.
+Comandos disponíveis:
+  • load   - Carrega dados da API do GitHub e salva no banco
+  • report - Gera relatório baseado nos dados salvos no banco
+  • clear  - Limpa completamente o banco de dados
+
+Use 'pr-champion [command] --help' para mais informações sobre cada comando.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		cmd.Help()
+	},
+}
+
+// Comando load para carregar dados do GitHub
+var loadCmd = &cobra.Command{
+	Use:   "load",
+	Short: "Carrega dados da API do GitHub e salva no banco",
+	Long: `Carrega PRs mergeados e comentários da API do GitHub no período especificado
+e salva todos os dados no banco de dados local para posterior análise.
 
 APENAS PRs mergeados para a branch de produção são considerados!
 
@@ -932,142 +1417,247 @@ Formato das branches de produção:
   • owner/repo:branch1|branch2|branch3 (múltiplas branches aceitas - separador |)
   • owner/repo:feat/rebrand-main|main (suporta branches com barras)`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Carrega variáveis do arquivo .env se existir
-		if err := godotenv.Load(); err != nil {
-			// Não é um erro fatal se o arquivo .env não existir
-			if !os.IsNotExist(err) {
-				fmt.Printf("⚠️  Aviso: Erro ao carregar .env: %v\n", err)
-			}
-		} else {
-			fmt.Println("✅ Arquivo .env carregado com sucesso")
-		}
+		loadDataFromGithub(cmd)
+	},
+}
 
-		token, _ := cmd.Flags().GetString("token")
-		owner, _ := cmd.Flags().GetString("owner")
-		repo, _ := cmd.Flags().GetString("repo")
-		reposList, _ := cmd.Flags().GetStringSlice("repos")
-		startDateStr, _ := cmd.Flags().GetString("start")
-		endDateStr, _ := cmd.Flags().GetString("end")
-		daysBack, _ := cmd.Flags().GetInt("days")
-		clearDatabase, _ := cmd.Flags().GetBool("clear-database")
+// Comando report para gerar relatório
+var reportCmd = &cobra.Command{
+	Use:   "report",
+	Short: "Gera relatório baseado nos dados salvos no banco",
+	Long: `Gera relatório de ranking baseado nos dados já carregados no banco de dados.
 
-		// Validação do token
-		if token == "" {
-			token = os.Getenv("GITHUB_TOKEN")
-			if token == "" {
-				log.Fatal("❌ Token do GitHub é obrigatório. Use --token ou defina GITHUB_TOKEN")
-			}
-		}
+Este comando não faz chamadas à API do GitHub, apenas processa os dados
+já salvos localmente para gerar os rankings e estatísticas.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		generateReportFromDatabase(cmd)
+	},
+}
 
-		// Construir lista de repositórios
-		var repositories []Repository
-		var err error
-
-		if len(reposList) > 0 {
-			// Usar lista de repositórios da flag --repos
-			repositories, err = parseRepositories(reposList)
-			if err != nil {
-				log.Fatalf("❌ Erro ao parsear repositórios da flag: %v", err)
-			}
-		} else if owner != "" && repo != "" {
-			// Usar repositório único (compatibilidade)
-			repositories = []Repository{{Owner: owner, Name: repo, ProductionBranches: []string{"main"}}}
-		} else {
-			// Tentar ler da variável de ambiente GITHUB_REPOS
-			envRepos := os.Getenv("GITHUB_REPOS")
-			if envRepos != "" {
-				repoStrings := strings.Split(envRepos, ",")
-				// Remove espaços em branco
-				for i, repo := range repoStrings {
-					repoStrings[i] = strings.TrimSpace(repo)
-				}
-				repositories, err = parseRepositories(repoStrings)
-				if err != nil {
-					log.Fatalf("❌ Erro ao parsear repositórios da variável GITHUB_REPOS: %v", err)
-				}
-				fmt.Printf("📋 Usando repositórios da variável GITHUB_REPOS: %s\n", envRepos)
-			} else {
-				log.Fatal("❌ Especifique repositórios usando:\n" +
-					"   • --repos owner1/repo1:main|master,owner2/repo2\n" +
-					"   • --owner e --repo (repositório único)\n" +
-					"   • Variável GITHUB_REPOS=owner1/repo1:main|master,owner2/repo2")
-			}
-		}
-
-		var startDate, endDate time.Time
-
-		// Se foi especificado --days, calcula as datas automaticamente
-		if daysBack > 0 {
-			endDate = time.Now()
-			startDate = endDate.Add(-time.Duration(daysBack) * 24 * time.Hour)
-		} else {
-			// Parse das datas
-			if startDateStr == "" {
-				startDate = time.Now().Add(-30 * 24 * time.Hour) // 30 dias atrás por padrão
-			} else {
-				startDate, err = parseDate(startDateStr)
-				if err != nil {
-					log.Fatalf("❌ Erro na data de início: %v", err)
-				}
-			}
-
-			if endDateStr == "" {
-				endDate = time.Now()
-			} else {
-				endDate, err = parseDate(endDateStr)
-				if err != nil {
-					log.Fatalf("❌ Erro na data de fim: %v", err)
-				}
-			}
-		}
-
-		// Validação das datas
-		if endDate.Before(startDate) {
-			log.Fatal("❌ Data de fim deve ser posterior à data de início")
-		}
-
-		fmt.Println("🚀 Iniciando PR Champion...")
-
-		prChampion, err := NewPRChampion(token, repositories, startDate, endDate)
-		if err != nil {
-			log.Fatalf("❌ Erro ao inicializar PR Champion: %v", err)
-		}
-
-		// Garante que a conexão seja fechada no final
-		defer func() {
-			if prChampion.cachedClient != nil {
-				prChampion.cachedClient.Close()
-			}
-		}()
-
-		// Se a flag clear-database foi especificada, limpa o cache primeiro
-		if clearDatabase {
-			fmt.Println("🗑️  Limpando cache do banco de dados...")
-			if err := prChampion.ClearCache(); err != nil {
-				log.Fatalf("❌ Erro ao limpar cache: %v", err)
-			}
-			fmt.Println("✅ Cache limpo com sucesso!")
-		}
-
-		if err := prChampion.FetchMergedPRs(); err != nil {
-			log.Fatalf("❌ Erro ao buscar PRs: %v", err)
-		}
-
-		prChampion.GenerateReport()
-
-		fmt.Println("\n✅ Relatório gerado com sucesso!")
+// Comando clear para limpar banco
+var clearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Limpa completamente o banco de dados",
+	Long: `Remove completamente todas as tabelas do banco de dados.
+As tabelas serão recriadas automaticamente na próxima execução do comando 'load'.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		clearDatabase()
 	},
 }
 
 func init() {
-	rootCmd.Flags().StringP("token", "t", "", "Token de acesso do GitHub (ou use GITHUB_TOKEN env var)")
-	rootCmd.Flags().StringP("owner", "o", "", "Owner do repositório (compatibilidade com repo único)")
-	rootCmd.Flags().StringP("repo", "r", "", "Nome do repositório (compatibilidade com repo único)")
-	rootCmd.Flags().StringSliceP("repos", "R", []string{}, "Lista de repositórios no formato owner/repo (ou use GITHUB_REPOS env var)")
-	rootCmd.Flags().StringP("start", "s", "", "Data de início (DD/MM/YYYY ou YYYY-MM-DD)")
-	rootCmd.Flags().StringP("end", "e", "", "Data de fim (DD/MM/YYYY ou YYYY-MM-DD)")
-	rootCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para analisar (alternativa às datas específicas)")
-	rootCmd.Flags().BoolP("clear-database", "c", false, "Limpa todo o cache do banco de dados antes de executar")
+	// Adiciona subcomandos
+	rootCmd.AddCommand(loadCmd)
+	rootCmd.AddCommand(reportCmd)
+	rootCmd.AddCommand(clearCmd)
+
+	// Flags do comando load
+	loadCmd.Flags().StringP("token", "t", "", "Token de acesso do GitHub (ou use GITHUB_TOKEN env var)")
+	loadCmd.Flags().StringP("owner", "o", "", "Owner do repositório (compatibilidade com repo único)")
+	loadCmd.Flags().StringP("repo", "r", "", "Nome do repositório (compatibilidade com repo único)")
+	loadCmd.Flags().StringSliceP("repos", "R", []string{}, "Lista de repositórios no formato owner/repo (ou use GITHUB_REPOS env var)")
+	loadCmd.Flags().StringP("start", "s", "", "Data de início (DD/MM/YYYY ou YYYY-MM-DD)")
+	loadCmd.Flags().StringP("end", "e", "", "Data de fim (DD/MM/YYYY ou YYYY-MM-DD) - padrão: hoje")
+	loadCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para analisar (alternativa às datas específicas)")
+
+	// Flags do comando report
+	reportCmd.Flags().StringP("start", "s", "", "Data de início para filtrar dados (DD/MM/YYYY ou YYYY-MM-DD)")
+	reportCmd.Flags().StringP("end", "e", "", "Data de fim para filtrar dados (DD/MM/YYYY ou YYYY-MM-DD)")
+	reportCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para filtrar dados (alternativa às datas específicas)")
+}
+
+// loadDataFromGithub carrega dados da API do GitHub e salva no banco
+func loadDataFromGithub(cmd *cobra.Command) {
+	// Carrega variáveis do arquivo .env se existir
+	if err := godotenv.Load(); err != nil {
+		// Não é um erro fatal se o arquivo .env não existir
+		if !os.IsNotExist(err) {
+			fmt.Printf("⚠️  Aviso: Erro ao carregar .env: %v\n", err)
+		}
+	} else {
+		fmt.Println("✅ Arquivo .env carregado com sucesso")
+	}
+
+	token, _ := cmd.Flags().GetString("token")
+	owner, _ := cmd.Flags().GetString("owner")
+	repo, _ := cmd.Flags().GetString("repo")
+	reposList, _ := cmd.Flags().GetStringSlice("repos")
+	startDateStr, _ := cmd.Flags().GetString("start")
+	endDateStr, _ := cmd.Flags().GetString("end")
+	daysBack, _ := cmd.Flags().GetInt("days")
+
+	// Validação do token
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+		if token == "" {
+			log.Fatal("❌ Token do GitHub é obrigatório. Use --token ou defina GITHUB_TOKEN")
+		}
+	}
+
+	// Construir lista de repositórios
+	var repositories []Repository
+	var err error
+
+	if len(reposList) > 0 {
+		// Usar lista de repositórios da flag --repos
+		repositories, err = parseRepositories(reposList)
+		if err != nil {
+			log.Fatalf("❌ Erro ao parsear repositórios da flag: %v", err)
+		}
+	} else if owner != "" && repo != "" {
+		// Usar repositório único (compatibilidade)
+		repositories = []Repository{{Owner: owner, Name: repo, ProductionBranches: []string{"main"}}}
+	} else {
+		// Tentar ler da variável de ambiente GITHUB_REPOS
+		envRepos := os.Getenv("GITHUB_REPOS")
+		if envRepos != "" {
+			repoStrings := strings.Split(envRepos, ",")
+			// Remove espaços em branco
+			for i, repo := range repoStrings {
+				repoStrings[i] = strings.TrimSpace(repo)
+			}
+			repositories, err = parseRepositories(repoStrings)
+			if err != nil {
+				log.Fatalf("❌ Erro ao parsear repositórios da variável GITHUB_REPOS: %v", err)
+			}
+			fmt.Printf("📋 Usando repositórios da variável GITHUB_REPOS: %s\n", envRepos)
+		} else {
+			log.Fatal("❌ Especifique repositórios usando:\n" +
+				"   • --repos owner1/repo1:main|master,owner2/repo2\n" +
+				"   • --owner e --repo (repositório único)\n" +
+				"   • Variável GITHUB_REPOS=owner1/repo1:main|master,owner2/repo2")
+		}
+	}
+
+	var startDate, endDate time.Time
+
+	// Se foi especificado --days, calcula as datas automaticamente
+	if daysBack > 0 {
+		endDate = time.Now()
+		startDate = endDate.Add(-time.Duration(daysBack) * 24 * time.Hour)
+	} else {
+		// Parse das datas
+		if startDateStr == "" {
+			startDate = time.Now().Add(-30 * 24 * time.Hour) // 30 dias atrás por padrão
+		} else {
+			startDate, err = parseDate(startDateStr)
+			if err != nil {
+				log.Fatalf("❌ Erro na data de início: %v", err)
+			}
+		}
+
+		if endDateStr == "" {
+			endDate = time.Now() // Até hoje por padrão
+		} else {
+			endDate, err = parseDate(endDateStr)
+			if err != nil {
+				log.Fatalf("❌ Erro na data de fim: %v", err)
+			}
+		}
+	}
+
+	// Validação das datas
+	if endDate.Before(startDate) {
+		log.Fatal("❌ Data de fim deve ser posterior à data de início")
+	}
+
+	fmt.Printf("🚀 Carregando dados do GitHub (%s até %s)...\n",
+		startDate.Format("02/01/2006"), endDate.Format("02/01/2006"))
+
+	prChampion, err := NewPRChampion(token, repositories, startDate, endDate)
+	if err != nil {
+		log.Fatalf("❌ Erro ao inicializar PR Champion: %v", err)
+	}
+
+	// Garante que a conexão seja fechada no final
+	defer func() {
+		if prChampion.cachedClient != nil {
+			prChampion.cachedClient.Close()
+		}
+	}()
+
+	if err := prChampion.FetchMergedPRs(); err != nil {
+		log.Fatalf("❌ Erro ao buscar PRs: %v", err)
+	}
+
+	fmt.Println("✅ Dados carregados com sucesso no banco de dados!")
+}
+
+// generateReportFromDatabase gera relatório baseado nos dados salvos no banco
+func generateReportFromDatabase(cmd *cobra.Command) {
+	fmt.Println("📊 Gerando relatório dos dados salvos...")
+
+	startDateStr, _ := cmd.Flags().GetString("start")
+	endDateStr, _ := cmd.Flags().GetString("end")
+	daysBack, _ := cmd.Flags().GetInt("days")
+
+	var startDate, endDate time.Time
+	var err error
+
+	// Se foi especificado --days, calcula as datas automaticamente
+	if daysBack > 0 {
+		endDate = time.Now()
+		startDate = endDate.Add(-time.Duration(daysBack) * 24 * time.Hour)
+	} else {
+		// Parse das datas (opcionais para filtrar dados)
+		if startDateStr != "" {
+			startDate, err = parseDate(startDateStr)
+			if err != nil {
+				log.Fatalf("❌ Erro na data de início: %v", err)
+			}
+		}
+
+		if endDateStr != "" {
+			endDate, err = parseDate(endDateStr)
+			if err != nil {
+				log.Fatalf("❌ Erro na data de fim: %v", err)
+			}
+		}
+	}
+
+	// Cria instância mínima apenas para acessar o banco (sem precisar de token)
+	prChampion, err := NewPRChampionFromDatabase(startDate, endDate)
+	if err != nil {
+		log.Fatalf("❌ Erro ao inicializar acesso ao banco: %v", err)
+	}
+
+	// Garante que a conexão seja fechada no final
+	defer func() {
+		if prChampion.cachedClient != nil {
+			prChampion.cachedClient.Close()
+		}
+	}()
+
+	if err := prChampion.LoadDataFromDatabase(); err != nil {
+		log.Fatalf("❌ Erro ao carregar dados do banco: %v", err)
+	}
+
+	prChampion.GenerateReport()
+	fmt.Println("✅ Relatório gerado com sucesso!")
+}
+
+// clearDatabase limpa completamente o banco de dados
+func clearDatabase() {
+	fmt.Println("🗑️  Limpando banco de dados...")
+
+	// Cria instância mínima apenas para acessar o banco
+	prChampion, err := NewPRChampionFromDatabase(time.Time{}, time.Time{})
+	if err != nil {
+		log.Fatalf("❌ Erro ao inicializar acesso ao banco: %v", err)
+	}
+
+	// Garante que a conexão seja fechada no final
+	defer func() {
+		if prChampion.cachedClient != nil {
+			prChampion.cachedClient.Close()
+		}
+	}()
+
+	if err := prChampion.ClearCache(); err != nil {
+		log.Fatalf("❌ Erro ao limpar banco: %v", err)
+	}
+
+	fmt.Println("✅ Banco de dados completamente limpo!")
 }
 
 func main() {

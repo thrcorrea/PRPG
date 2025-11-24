@@ -55,6 +55,17 @@ func (c *CachedGithubAdapter) ensurePRExists(ctx context.Context, owner, repo st
 		return fmt.Errorf("erro ao salvar PR completo: %v", err)
 	}
 
+	// Salva as labels do PR
+	if len(pr.Labels) > 0 {
+		var labelData []*database.PRLabelData
+		for _, label := range pr.Labels {
+			labelData = append(labelData, database.FromGithubLabel(label, owner, repo, prNumber))
+		}
+		if err := c.db.SavePRLabels(labelData); err != nil {
+			fmt.Printf("⚠️  Aviso: erro ao salvar labels do PR: %v\n", err)
+		}
+	}
+
 	return nil
 }
 
@@ -274,10 +285,77 @@ func (c *CachedGithubAdapter) ListPullRequestCommentReactions(ctx context.Contex
 	return reactions, nil
 }
 
+// ListPRReviews busca reviews de um PR com cache
+func (c *CachedGithubAdapter) ListPRReviews(ctx context.Context, owner, repo string, prNumber int) ([]*github.PullRequestReview, error) {
+	// Primeiro verifica se já temos informações sobre este PR
+	prData, err := c.db.GetPR(owner, repo, prNumber)
+	if err == nil && prData != nil {
+		// Se já verificamos que este PR não tem reviews, retorna lista vazia
+		if prData.ReviewsChecked && !prData.HasReviews {
+			fmt.Printf("    📋 Cache HIT: PR #%d em %s/%s confirmado sem reviews\n", prNumber, owner, repo)
+			return []*github.PullRequestReview{}, nil
+		}
+	}
+
+	// Busca reviews existentes no cache
+	cachedReviews, err := c.db.GetReviewsByPR(owner, repo, prNumber)
+	if err != nil {
+		fmt.Printf("    ⚠️  Erro ao buscar reviews do cache: %v\n", err)
+	}
+
+	// Verifica se temos reviews válidos no cache
+	if len(cachedReviews) > 0 && !c.areReviewsStale(cachedReviews) {
+		// fmt.Printf("    📋 Cache HIT: Reviews do PR #%d em %s/%s\n", prNumber, owner, repo)
+		return c.convertCachedReviewsToGithub(cachedReviews), nil
+	}
+
+	// Cache MISS - busca da API
+	fmt.Printf("    🌐 Cache MISS: Buscando reviews do PR #%d em %s/%s da API\n", prNumber, owner, repo)
+
+	// Garante que temos dados completos do PR antes de buscar reviews
+	if err := c.ensurePRExists(ctx, owner, repo, prNumber); err != nil {
+		fmt.Printf("    ⚠️  Erro ao garantir dados do PR: %v\n", err)
+		// Continua mesmo com erro, pois os reviews ainda podem ser buscados
+	}
+
+	reviews, err := c.githubClient.ListPRReviews(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	// Salva os reviews no cache
+	hasApprovedReviews := false
+	for _, review := range reviews {
+		reviewData := database.FromGithubReview(review, owner, repo, prNumber)
+		if err := c.db.SaveReview(reviewData); err != nil {
+			fmt.Printf("    ⚠️  Erro ao salvar review no cache: %v\n", err)
+		}
+
+		// Verifica se tem pelo menos um review aprovado
+		if review.GetState() == "APPROVED" {
+			hasApprovedReviews = true
+		}
+	}
+
+	// Marca o PR como verificado para reviews
+	hasReviews := len(reviews) > 0
+	if err := c.db.MarkPRReviewsChecked(owner, repo, prNumber, hasReviews, hasApprovedReviews); err != nil {
+		fmt.Printf("    ⚠️  Erro ao marcar PR como verificado para reviews: %v\n", err)
+	}
+
+	fmt.Printf("    ✅ Reviews do PR #%d salvos (%d reviews encontrados, aprovados: %t)\n", prNumber, len(reviews), hasApprovedReviews)
+	return reviews, nil
+}
+
 // ClearCache limpa todo o cache do banco de dados
 func (c *CachedGithubAdapter) ClearCache() error {
 	fmt.Println("🗑️  Limpando cache do banco de dados...")
 	return c.db.ClearDatabase()
+}
+
+// GetDatabase retorna a instância do banco de dados para consultas diretas
+func (c *CachedGithubAdapter) GetDatabase() database.CommentDatabase {
+	return c.db
 }
 
 // Close fecha as conexões
@@ -365,4 +443,36 @@ func (c *CachedGithubAdapter) convertCachedReactionsToGithub(cachedReactions []*
 	}
 
 	return reactions
+}
+
+// areReviewsStale verifica se os reviews em cache estão desatualizados
+func (c *CachedGithubAdapter) areReviewsStale(reviews []*database.ReviewData) bool {
+	cacheDuration := 7 * 24 * time.Hour // 7 dias
+
+	for _, review := range reviews {
+		if time.Since(review.CachedAt) > cacheDuration {
+			return true
+		}
+	}
+	return false
+}
+
+// convertCachedReviewsToGithub converte reviews do cache para formato GitHub
+func (c *CachedGithubAdapter) convertCachedReviewsToGithub(cachedReviews []*database.ReviewData) []*github.PullRequestReview {
+	var reviews []*github.PullRequestReview
+
+	for _, cached := range cachedReviews {
+		review := &github.PullRequestReview{
+			ID:    &cached.ReviewID,
+			State: &cached.State,
+			Body:  &cached.Body,
+			User: &github.User{
+				Login: &cached.Username,
+			},
+			SubmittedAt: &github.Timestamp{Time: cached.SubmittedAt},
+		}
+		reviews = append(reviews, review)
+	}
+
+	return reviews
 }

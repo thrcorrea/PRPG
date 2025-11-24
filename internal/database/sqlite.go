@@ -16,6 +16,7 @@ type CommentDatabase interface {
 	GetPR(repoOwner, repoName string, prNumber int) (*PRData, error)
 	SavePR(pr *PRData) error
 	MarkPRCommentsChecked(repoOwner, repoName string, prNumber int, commentType string, hasComments bool) error
+	MarkPRReviewsChecked(repoOwner, repoName string, prNumber int, hasReviews, hasApprovedReviews bool) error
 
 	// Comentários
 	GetComment(repoOwner, repoName string, commentID int64) (*CommentData, error)
@@ -24,11 +25,26 @@ type CommentDatabase interface {
 	GetCommentsByPRAndType(repoOwner, repoName string, prNumber int, commentType string) ([]*CommentData, error)
 	MarkReactionsChecked(commentID int64) error
 
+	// Reviews
+	GetReview(repoOwner, repoName string, reviewID int64) (*ReviewData, error)
+	SaveReview(review *ReviewData) error
+	GetReviewsByPR(repoOwner, repoName string, prNumber int) ([]*ReviewData, error)
+
 	// Reações
 	GetReactions(commentID int64) ([]*ReactionData, error)
 	GetReactionsByType(commentID int64, reactionType string) ([]*ReactionData, error)
 	SaveReaction(reaction *ReactionData) error
 	SaveReactions(reactions []*ReactionData) error
+
+	// Labels/Tags
+	GetLabelsByPR(repoOwner, repoName string, prNumber int) ([]*PRLabelData, error)
+	SavePRLabels(labels []*PRLabelData) error
+
+	// Consultas para relatório
+	GetAllPRs() ([]*PRData, error)
+	GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error)
+	GetAllComments() ([]*CommentData, error)
+	GetAllCommentsInDateRange(startDate, endDate time.Time) ([]*CommentData, error)
 
 	// Utilitários
 	ClearDatabase() error
@@ -96,12 +112,18 @@ func (db *sqliteDatabase) createTables() error {
 		title TEXT NOT NULL,
 		username TEXT NOT NULL,
 		merged_at DATETIME NOT NULL,
+		additions INTEGER DEFAULT 0,
+		deletions INTEGER DEFAULT 0,
+		changed_files INTEGER DEFAULT 0,
 		has_comments BOOLEAN DEFAULT FALSE,
 		has_issue_comments BOOLEAN DEFAULT FALSE,
 		has_review_comments BOOLEAN DEFAULT FALSE,
+		has_reviews BOOLEAN DEFAULT FALSE,
+		has_approved_reviews BOOLEAN DEFAULT FALSE,
 		comments_checked BOOLEAN DEFAULT FALSE,
 		issue_comments_checked BOOLEAN DEFAULT FALSE,
 		review_comments_checked BOOLEAN DEFAULT FALSE,
+		reviews_checked BOOLEAN DEFAULT FALSE,
 		cached_at DATETIME NOT NULL,
 		UNIQUE(repo_owner, repo_name, pr_number)
 	);`
@@ -114,9 +136,40 @@ func (db *sqliteDatabase) createTables() error {
 		reaction_type TEXT NOT NULL DEFAULT 'issue_comment',
 		content TEXT NOT NULL,
 		username TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
 		cached_at DATETIME NOT NULL,
 		FOREIGN KEY(comment_id) REFERENCES comments(comment_id),
 		UNIQUE(comment_id, reaction_type, content, username)
+	);`
+
+	// Tabela de reviews
+	createReviewsTable := `
+	CREATE TABLE IF NOT EXISTS reviews (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_owner TEXT NOT NULL,
+		repo_name TEXT NOT NULL,
+		pr_number INTEGER NOT NULL,
+		review_id INTEGER NOT NULL UNIQUE,
+		username TEXT NOT NULL,
+		state TEXT NOT NULL,
+		body TEXT,
+		submitted_at DATETIME NOT NULL,
+		cached_at DATETIME NOT NULL,
+		UNIQUE(review_id)
+	);`
+
+	// Tabela de labels dos PRs
+	createPRLabelsTable := `
+	CREATE TABLE IF NOT EXISTS pr_labels (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_owner TEXT NOT NULL,
+		repo_name TEXT NOT NULL,
+		pr_number INTEGER NOT NULL,
+		label_name TEXT NOT NULL,
+		color TEXT,
+		description TEXT,
+		FOREIGN KEY(repo_owner, repo_name, pr_number) REFERENCES prs(repo_owner, repo_name, pr_number),
+		UNIQUE(repo_owner, repo_name, pr_number, label_name)
 	);`
 
 	// Índices para melhor performance
@@ -127,6 +180,10 @@ func (db *sqliteDatabase) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_comments_cached_at ON comments(cached_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_prs_repo ON prs(repo_owner, repo_name);`,
 		`CREATE INDEX IF NOT EXISTS idx_prs_repo_pr ON prs(repo_owner, repo_name, pr_number);`,
+		`CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo_owner, repo_name, pr_number);`,
+		`CREATE INDEX IF NOT EXISTS idx_reviews_review_id ON reviews(review_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_labels_repo_pr ON pr_labels(repo_owner, repo_name, pr_number);`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_labels_name ON pr_labels(label_name);`,
 	}
 
 	// Executa criação das tabelas
@@ -140,6 +197,14 @@ func (db *sqliteDatabase) createTables() error {
 
 	if _, err := db.db.Exec(createReactionsTable); err != nil {
 		return fmt.Errorf("erro ao criar tabela reactions: %v", err)
+	}
+
+	if _, err := db.db.Exec(createReviewsTable); err != nil {
+		return fmt.Errorf("erro ao criar tabela reviews: %v", err)
+	}
+
+	if _, err := db.db.Exec(createPRLabelsTable); err != nil {
+		return fmt.Errorf("erro ao criar tabela pr_labels: %v", err)
 	}
 
 	// Executa criação dos índices
@@ -156,8 +221,8 @@ func (db *sqliteDatabase) createTables() error {
 func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRData, error) {
 	query := `
 		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at,
-		       has_comments, has_issue_comments, has_review_comments,
-		       comments_checked, issue_comments_checked, review_comments_checked, cached_at
+		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
+		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
 		FROM prs 
 		WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
 
@@ -175,9 +240,12 @@ func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRDa
 		&pr.HasComments,
 		&pr.HasIssueComments,
 		&pr.HasReviewComments,
+		&pr.HasReviews,
+		&pr.HasApprovedReviews,
 		&pr.CommentsChecked,
 		&pr.IssueCommentsChecked,
 		&pr.ReviewCommentsChecked,
+		&pr.ReviewsChecked,
 		&pr.CachedAt,
 	)
 
@@ -195,10 +263,10 @@ func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRDa
 func (db *sqliteDatabase) SavePR(pr *PRData) error {
 	query := `
 		INSERT OR REPLACE INTO prs 
-		(repo_owner, repo_name, pr_number, title, username, merged_at,
-		 has_comments, has_issue_comments, has_review_comments,
-		 comments_checked, issue_comments_checked, review_comments_checked, cached_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
+		 has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
+		 comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := db.db.Exec(query,
 		pr.RepoOwner,
@@ -207,12 +275,18 @@ func (db *sqliteDatabase) SavePR(pr *PRData) error {
 		pr.Title,
 		pr.Username,
 		pr.MergedAt,
+		pr.Additions,
+		pr.Deletions,
+		pr.ChangedFiles,
 		pr.HasComments,
 		pr.HasIssueComments,
 		pr.HasReviewComments,
+		pr.HasReviews,
+		pr.HasApprovedReviews,
 		pr.CommentsChecked,
 		pr.IssueCommentsChecked,
 		pr.ReviewCommentsChecked,
+		pr.ReviewsChecked,
 		pr.CachedAt,
 	)
 
@@ -255,6 +329,9 @@ func (db *sqliteDatabase) MarkPRCommentsChecked(repoOwner, repoName string, prNu
 		args = []interface{}{hasComments, repoOwner, repoName, prNumber}
 	case "review":
 		query = `UPDATE prs SET review_comments_checked = TRUE, has_review_comments = ? WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
+		args = []interface{}{hasComments, repoOwner, repoName, prNumber}
+	case "reviews":
+		query = `UPDATE prs SET reviews_checked = TRUE, has_reviews = ? WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
 		args = []interface{}{hasComments, repoOwner, repoName, prNumber}
 	default:
 		query = `UPDATE prs SET comments_checked = TRUE, has_comments = ? WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
@@ -442,7 +519,7 @@ func (db *sqliteDatabase) MarkReactionsChecked(commentID int64) error {
 // GetReactions busca todas as reações de um comentário
 func (db *sqliteDatabase) GetReactions(commentID int64) ([]*ReactionData, error) {
 	query := `
-		SELECT id, comment_id, reaction_type, content, username, cached_at
+		SELECT id, comment_id, reaction_type, content, username, created_at, cached_at
 		FROM reactions 
 		WHERE comment_id = ?`
 
@@ -461,6 +538,7 @@ func (db *sqliteDatabase) GetReactions(commentID int64) ([]*ReactionData, error)
 			&reaction.ReactionType,
 			&reaction.Content,
 			&reaction.Username,
+			&reaction.CreatedAt,
 			&reaction.CachedAt,
 		)
 		if err != nil {
@@ -475,7 +553,7 @@ func (db *sqliteDatabase) GetReactions(commentID int64) ([]*ReactionData, error)
 // GetReactionsByType busca reações de um comentário por tipo específico
 func (db *sqliteDatabase) GetReactionsByType(commentID int64, reactionType string) ([]*ReactionData, error) {
 	query := `
-		SELECT id, comment_id, reaction_type, content, username, cached_at
+		SELECT id, comment_id, reaction_type, content, username, created_at, cached_at
 		FROM reactions 
 		WHERE comment_id = ? AND reaction_type = ?`
 
@@ -494,6 +572,7 @@ func (db *sqliteDatabase) GetReactionsByType(commentID int64, reactionType strin
 			&reaction.ReactionType,
 			&reaction.Content,
 			&reaction.Username,
+			&reaction.CreatedAt,
 			&reaction.CachedAt,
 		)
 		if err != nil {
@@ -509,14 +588,15 @@ func (db *sqliteDatabase) GetReactionsByType(commentID int64, reactionType strin
 func (db *sqliteDatabase) SaveReaction(reaction *ReactionData) error {
 	query := `
 		INSERT OR REPLACE INTO reactions 
-		(comment_id, reaction_type, content, username, cached_at)
-		VALUES (?, ?, ?, ?, ?)`
+		(comment_id, reaction_type, content, username, created_at, cached_at)
+		VALUES (?, ?, ?, ?, ?, ?)`
 
 	_, err := db.db.Exec(query,
 		reaction.CommentID,
 		reaction.ReactionType,
 		reaction.Content,
 		reaction.Username,
+		reaction.CreatedAt,
 		reaction.CachedAt,
 	)
 
@@ -543,8 +623,8 @@ func (db *sqliteDatabase) SaveReactions(reactions []*ReactionData) error {
 
 	query := `
 		INSERT OR REPLACE INTO reactions 
-		(comment_id, reaction_type, content, username, cached_at)
-		VALUES (?, ?, ?, ?, ?)`
+		(comment_id, reaction_type, content, username, created_at, cached_at)
+		VALUES (?, ?, ?, ?, ?, ?)`
 
 	stmt, err := tx.Prepare(query)
 	if err != nil {
@@ -558,6 +638,7 @@ func (db *sqliteDatabase) SaveReactions(reactions []*ReactionData) error {
 			reaction.ReactionType,
 			reaction.Content,
 			reaction.Username,
+			reaction.CreatedAt,
 			reaction.CachedAt,
 		)
 		if err != nil {
@@ -572,29 +653,472 @@ func (db *sqliteDatabase) SaveReactions(reactions []*ReactionData) error {
 	return nil
 }
 
-// ClearDatabase limpa todos os dados do banco
+// GetLabelsByPR busca todas as labels de um PR
+func (db *sqliteDatabase) GetLabelsByPR(repoOwner, repoName string, prNumber int) ([]*PRLabelData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, label_name, color, description
+		FROM pr_labels 
+		WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
+
+	rows, err := db.db.Query(query, repoOwner, repoName, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar labels do PR: %v", err)
+	}
+	defer rows.Close()
+
+	var labels []*PRLabelData
+	for rows.Next() {
+		label := &PRLabelData{}
+		err := rows.Scan(
+			&label.ID,
+			&label.RepoOwner,
+			&label.RepoName,
+			&label.PRNumber,
+			&label.LabelName,
+			&label.Color,
+			&label.Description,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear label: %v", err)
+		}
+		labels = append(labels, label)
+	}
+
+	return labels, nil
+}
+
+// SavePRLabels salva múltiplas labels de um PR no banco
+func (db *sqliteDatabase) SavePRLabels(labels []*PRLabelData) error {
+	if len(labels) == 0 {
+		return nil
+	}
+
+	tx, err := db.db.Begin()
+	if err != nil {
+		return fmt.Errorf("erro ao iniciar transação: %v", err)
+	}
+	defer func() {
+		_ = tx.Rollback() // Ignore rollback errors
+	}()
+
+	// Primeiro, remove labels existentes do PR
+	if len(labels) > 0 {
+		deleteQuery := `DELETE FROM pr_labels WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
+		_, err = tx.Exec(deleteQuery, labels[0].RepoOwner, labels[0].RepoName, labels[0].PRNumber)
+		if err != nil {
+			return fmt.Errorf("erro ao limpar labels existentes: %v", err)
+		}
+	}
+
+	query := `
+		INSERT INTO pr_labels 
+		(repo_owner, repo_name, pr_number, label_name, color, description)
+		VALUES (?, ?, ?, ?, ?, ?)`
+
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		return fmt.Errorf("erro ao preparar statement: %v", err)
+	}
+	defer stmt.Close()
+
+	for _, label := range labels {
+		_, err := stmt.Exec(
+			label.RepoOwner,
+			label.RepoName,
+			label.PRNumber,
+			label.LabelName,
+			label.Color,
+			label.Description,
+		)
+		if err != nil {
+			return fmt.Errorf("erro ao salvar label: %v", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("erro ao confirmar transação: %v", err)
+	}
+
+	return nil
+}
+
+// MarkPRReviewsChecked marca que os reviews de um PR foram verificados
+func (db *sqliteDatabase) MarkPRReviewsChecked(repoOwner, repoName string, prNumber int, hasReviews, hasApprovedReviews bool) error {
+	// Verifica se o PR já existe
+	existingPR, err := db.GetPR(repoOwner, repoName, prNumber)
+	if err != nil {
+		return fmt.Errorf("erro ao verificar PR existente: %v", err)
+	}
+
+	// Se não existe, cria um registro básico
+	if existingPR == nil {
+		insertQuery := `
+			INSERT INTO prs 
+			(repo_owner, repo_name, pr_number, title, username, merged_at, cached_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`
+
+		now := time.Now()
+		_, err := db.db.Exec(insertQuery, repoOwner, repoName, prNumber, "", "", now, now)
+		if err != nil {
+			return fmt.Errorf("erro ao criar registro básico do PR: %v", err)
+		}
+	}
+
+	// Atualiza os campos de reviews
+	query := `UPDATE prs SET reviews_checked = TRUE, has_reviews = ?, has_approved_reviews = ? WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?`
+	args := []interface{}{hasReviews, hasApprovedReviews, repoOwner, repoName, prNumber}
+
+	_, err = db.db.Exec(query, args...)
+	if err != nil {
+		return fmt.Errorf("erro ao marcar reviews do PR como verificados: %v", err)
+	}
+
+	return nil
+}
+
+// GetReview busca um review pelo ID
+func (db *sqliteDatabase) GetReview(repoOwner, repoName string, reviewID int64) (*ReviewData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, review_id, username, state, body, submitted_at, cached_at
+		FROM reviews 
+		WHERE review_id = ?`
+
+	row := db.db.QueryRow(query, reviewID)
+
+	review := &ReviewData{}
+	err := row.Scan(
+		&review.ID,
+		&review.RepoOwner,
+		&review.RepoName,
+		&review.PRNumber,
+		&review.ReviewID,
+		&review.Username,
+		&review.State,
+		&review.Body,
+		&review.SubmittedAt,
+		&review.CachedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // Review não encontrado
+	}
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar review: %v", err)
+	}
+
+	return review, nil
+}
+
+// SaveReview salva um review no banco
+func (db *sqliteDatabase) SaveReview(review *ReviewData) error {
+	query := `
+		INSERT OR REPLACE INTO reviews 
+		(repo_owner, repo_name, pr_number, review_id, username, state, body, submitted_at, cached_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	_, err := db.db.Exec(query,
+		review.RepoOwner,
+		review.RepoName,
+		review.PRNumber,
+		review.ReviewID,
+		review.Username,
+		review.State,
+		review.Body,
+		review.SubmittedAt,
+		review.CachedAt,
+	)
+
+	if err != nil {
+		return fmt.Errorf("erro ao salvar review: %v", err)
+	}
+
+	return nil
+}
+
+// GetReviewsByPR busca todos os reviews de um PR
+func (db *sqliteDatabase) GetReviewsByPR(repoOwner, repoName string, prNumber int) ([]*ReviewData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, review_id, username, state, body, submitted_at, cached_at
+		FROM reviews 
+		WHERE repo_owner = ? AND repo_name = ? AND pr_number = ?
+		ORDER BY submitted_at ASC`
+
+	rows, err := db.db.Query(query, repoOwner, repoName, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar reviews: %v", err)
+	}
+	defer rows.Close()
+
+	var reviews []*ReviewData
+	for rows.Next() {
+		review := &ReviewData{}
+		err := rows.Scan(
+			&review.ID,
+			&review.RepoOwner,
+			&review.RepoName,
+			&review.PRNumber,
+			&review.ReviewID,
+			&review.Username,
+			&review.State,
+			&review.Body,
+			&review.SubmittedAt,
+			&review.CachedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao scanear review: %v", err)
+		}
+		reviews = append(reviews, review)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro ao iterar reviews: %v", err)
+	}
+
+	return reviews, nil
+}
+
+// GetAllPRs busca todos os PRs salvos no banco
+func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
+		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
+		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
+		FROM prs 
+		ORDER BY merged_at DESC`
+
+	rows, err := db.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar todos os PRs: %v", err)
+	}
+	defer rows.Close()
+
+	var prs []*PRData
+	for rows.Next() {
+		pr := &PRData{}
+		err := rows.Scan(
+			&pr.ID,
+			&pr.RepoOwner,
+			&pr.RepoName,
+			&pr.PRNumber,
+			&pr.Title,
+			&pr.Username,
+			&pr.MergedAt,
+			&pr.Additions,
+			&pr.Deletions,
+			&pr.ChangedFiles,
+			&pr.HasComments,
+			&pr.HasIssueComments,
+			&pr.HasReviewComments,
+			&pr.HasReviews,
+			&pr.HasApprovedReviews,
+			&pr.CommentsChecked,
+			&pr.IssueCommentsChecked,
+			&pr.ReviewCommentsChecked,
+			&pr.ReviewsChecked,
+			&pr.CachedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear PR: %v", err)
+		}
+		prs = append(prs, pr)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos PRs: %v", err)
+	}
+
+	return prs, nil
+}
+
+// GetAllPRsInDateRange busca PRs em um intervalo de datas específico
+func (db *sqliteDatabase) GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
+		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
+		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
+		FROM prs 
+		WHERE merged_at >= ? AND merged_at <= ?
+		ORDER BY merged_at DESC`
+
+	rows, err := db.db.Query(query, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar PRs no intervalo de datas: %v", err)
+	}
+	defer rows.Close()
+
+	var prs []*PRData
+	for rows.Next() {
+		pr := &PRData{}
+		err := rows.Scan(
+			&pr.ID,
+			&pr.RepoOwner,
+			&pr.RepoName,
+			&pr.PRNumber,
+			&pr.Title,
+			&pr.Username,
+			&pr.MergedAt,
+			&pr.Additions,
+			&pr.Deletions,
+			&pr.ChangedFiles,
+			&pr.HasComments,
+			&pr.HasIssueComments,
+			&pr.HasReviewComments,
+			&pr.HasReviews,
+			&pr.HasApprovedReviews,
+			&pr.CommentsChecked,
+			&pr.IssueCommentsChecked,
+			&pr.ReviewCommentsChecked,
+			&pr.ReviewsChecked,
+			&pr.CachedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear PR: %v", err)
+		}
+		prs = append(prs, pr)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos PRs: %v", err)
+	}
+
+	return prs, nil
+}
+
+// GetAllComments busca todos os comentários salvos no banco
+func (db *sqliteDatabase) GetAllComments() ([]*CommentData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, comment_id, comment_type, 
+		       username, body, created_at, updated_at, cached_at, reactions_checked
+		FROM comments 
+		ORDER BY created_at ASC`
+
+	rows, err := db.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar todos os comentários: %v", err)
+	}
+	defer rows.Close()
+
+	var comments []*CommentData
+	for rows.Next() {
+		comment := &CommentData{}
+		err := rows.Scan(
+			&comment.ID,
+			&comment.RepoOwner,
+			&comment.RepoName,
+			&comment.PRNumber,
+			&comment.CommentID,
+			&comment.CommentType,
+			&comment.Username,
+			&comment.Body,
+			&comment.CreatedAt,
+			&comment.UpdatedAt,
+			&comment.CachedAt,
+			&comment.ReactionsChecked,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear comentário: %v", err)
+		}
+		comments = append(comments, comment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos comentários: %v", err)
+	}
+
+	return comments, nil
+}
+
+// GetAllCommentsInDateRange busca comentários em um intervalo de datas específico
+func (db *sqliteDatabase) GetAllCommentsInDateRange(startDate, endDate time.Time) ([]*CommentData, error) {
+	query := `
+		SELECT id, repo_owner, repo_name, pr_number, comment_id, comment_type, 
+		       username, body, created_at, updated_at, cached_at, reactions_checked
+		FROM comments 
+		WHERE created_at >= ? AND created_at <= ?
+		ORDER BY created_at ASC`
+
+	rows, err := db.db.Query(query, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar comentários no intervalo de datas: %v", err)
+	}
+	defer rows.Close()
+
+	var comments []*CommentData
+	for rows.Next() {
+		comment := &CommentData{}
+		err := rows.Scan(
+			&comment.ID,
+			&comment.RepoOwner,
+			&comment.RepoName,
+			&comment.PRNumber,
+			&comment.CommentID,
+			&comment.CommentType,
+			&comment.Username,
+			&comment.Body,
+			&comment.CreatedAt,
+			&comment.UpdatedAt,
+			&comment.CachedAt,
+			&comment.ReactionsChecked,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("erro ao escanear comentário: %v", err)
+		}
+		comments = append(comments, comment)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro durante iteração dos comentários: %v", err)
+	}
+
+	return comments, nil
+}
+
+// ClearDatabase remove todas as tabelas do banco - elas serão recriadas na próxima execução
 func (db *sqliteDatabase) ClearDatabase() error {
-	// Remove todas as reações primeiro (por causa da foreign key)
-	if _, err := db.db.Exec("DELETE FROM reactions"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela reactions: %v", err)
+	// Lista das tabelas a serem removidas (ordem importante por causa das foreign keys)
+	tables := []string{
+		"reactions", // Primeiro por causa da foreign key para comments
+		"comments",
+		"reviews",
+		"prs",
 	}
 
-	// Remove todos os comentários
-	if _, err := db.db.Exec("DELETE FROM comments"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela comments: %v", err)
+	// Remove cada tabela individualmente
+	for _, table := range tables {
+		dropQuery := fmt.Sprintf("DROP TABLE IF EXISTS %s", table)
+		if _, err := db.db.Exec(dropQuery); err != nil {
+			return fmt.Errorf("erro ao remover tabela %s: %v", table, err)
+		}
+		fmt.Printf("🗑️  Tabela '%s' removida com sucesso\n", table)
 	}
 
-	// Remove todos os PRs
-	if _, err := db.db.Exec("DELETE FROM prs"); err != nil {
-		return fmt.Errorf("erro ao limpar tabela prs: %v", err)
+	// Remove também os índices (SQLite remove automaticamente com as tabelas, mas vamos ser explícitos)
+	indices := []string{
+		"idx_comments_repo_pr",
+		"idx_comments_comment_id",
+		"idx_reactions_comment_id",
+		"idx_comments_cached_at",
+		"idx_prs_repo",
+		"idx_prs_repo_pr",
+		"idx_reviews_repo_pr",
+		"idx_reviews_review_id",
 	}
 
-	// Reset dos auto-increment
-	if _, err := db.db.Exec("DELETE FROM sqlite_sequence WHERE name IN ('comments', 'reactions', 'prs')"); err != nil {
+	for _, index := range indices {
+		dropIndexQuery := fmt.Sprintf("DROP INDEX IF EXISTS %s", index)
+		if _, err := db.db.Exec(dropIndexQuery); err != nil {
+			// Não é erro fatal se o índice não existir
+			fmt.Printf("⚠️  Aviso: Não foi possível remover índice %s: %v\n", index, err)
+		}
+	}
+
+	// Limpa a tabela de sequências do SQLite
+	if _, err := db.db.Exec("DELETE FROM sqlite_sequence WHERE name IN ('comments', 'reactions', 'reviews', 'prs')"); err != nil {
 		// Não é um erro fatal se a tabela sqlite_sequence não existir
-		fmt.Printf("⚠️  Aviso: Não foi possível resetar sequências: %v\n", err)
+		fmt.Printf("⚠️  Aviso: Não foi possível limpar sequências: %v\n", err)
 	}
 
+	fmt.Println("✅ Banco de dados completamente limpo - tabelas serão recriadas na próxima execução")
 	return nil
 }
 

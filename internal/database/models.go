@@ -29,7 +29,22 @@ type ReactionData struct {
 	ReactionType string    `json:"reaction_type"` // "issue_comment" ou "review_comment"
 	Content      string    `json:"content"`       // "+1", "-1", "heart", etc.
 	Username     string    `json:"username"`
+	CreatedAt    time.Time `json:"created_at"` // Data real de criação da reação
 	CachedAt     time.Time `json:"cached_at"`
+}
+
+// ReviewData representa um review armazenado no banco
+type ReviewData struct {
+	ID          int64     `json:"id"`
+	RepoOwner   string    `json:"repo_owner"`
+	RepoName    string    `json:"repo_name"`
+	PRNumber    int       `json:"pr_number"`
+	ReviewID    int64     `json:"review_id"`
+	Username    string    `json:"username"`
+	State       string    `json:"state"` // "APPROVED", "REQUEST_CHANGES", "COMMENTED", "DISMISSED"
+	Body        string    `json:"body"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	CachedAt    time.Time `json:"cached_at"`
 }
 
 // PRData representa um PR armazenado no banco
@@ -44,10 +59,40 @@ type PRData struct {
 	HasComments           bool      `json:"has_comments"`            // Se tem comentários (issue ou review)
 	HasIssueComments      bool      `json:"has_issue_comments"`      // Se tem issue comments
 	HasReviewComments     bool      `json:"has_review_comments"`     // Se tem review comments
+	HasReviews            bool      `json:"has_reviews"`             // Se tem reviews
+	HasApprovedReviews    bool      `json:"has_approved_reviews"`    // Se tem pelo menos um review approved
 	CommentsChecked       bool      `json:"comments_checked"`        // Se os comentários já foram verificados
 	IssueCommentsChecked  bool      `json:"issue_comments_checked"`  // Se issue comments foram verificados
 	ReviewCommentsChecked bool      `json:"review_comments_checked"` // Se review comments foram verificados
+	ReviewsChecked        bool      `json:"reviews_checked"`         // Se reviews foram verificados
+	Additions             int       `json:"additions"`               // Linhas adicionadas
+	Deletions             int       `json:"deletions"`               // Linhas removidas
+	ChangedFiles          int       `json:"changed_files"`           // Arquivos modificados
 	CachedAt              time.Time `json:"cached_at"`
+}
+
+// PRLabelData representa uma tag/label de um PR armazenada no banco
+// PRLabelData representa uma tag/label de um PR armazenada no banco
+type PRLabelData struct {
+	ID          int64  `json:"id"`
+	RepoOwner   string `json:"repo_owner"`
+	RepoName    string `json:"repo_name"`
+	PRNumber    int    `json:"pr_number"`
+	LabelName   string `json:"label_name"`
+	Color       string `json:"color"`       // Cor da label em hexadecimal
+	Description string `json:"description"` // Descrição da label
+}
+
+// FromGithubLabel converte um github.Label para PRLabelData
+func FromGithubLabel(label *github.Label, repoOwner, repoName string, prNumber int) *PRLabelData {
+	return &PRLabelData{
+		RepoOwner:   repoOwner,
+		RepoName:    repoName,
+		PRNumber:    prNumber,
+		LabelName:   label.GetName(),
+		Color:       label.GetColor(),
+		Description: label.GetDescription(),
+	}
 }
 
 // CommentWithReactions representa um comentário com suas reações
@@ -97,6 +142,7 @@ func FromGithubReaction(reaction *github.Reaction, commentID int64) *ReactionDat
 		ReactionType: "issue_comment",
 		Content:      reaction.GetContent(),
 		Username:     reaction.User.GetLogin(),
+		CreatedAt:    reaction.GetCreatedAt().Time,
 		CachedAt:     time.Now(),
 	}
 }
@@ -108,6 +154,7 @@ func FromGithubReviewReaction(reaction *github.Reaction, commentID int64) *React
 		ReactionType: "review_comment",
 		Content:      reaction.GetContent(),
 		Username:     reaction.User.GetLogin(),
+		CreatedAt:    reaction.GetCreatedAt().Time,
 		CachedAt:     time.Now(),
 	}
 }
@@ -121,12 +168,38 @@ func FromGithubPR(pr *github.PullRequest, repoOwner, repoName string) *PRData {
 		Title:                 pr.GetTitle(),
 		Username:              pr.User.GetLogin(),
 		MergedAt:              pr.MergedAt.Time,
+		Additions:             pr.GetAdditions(),
+		Deletions:             pr.GetDeletions(),
+		ChangedFiles:          pr.GetChangedFiles(),
 		HasComments:           false, // Será atualizado após verificação
 		HasIssueComments:      false, // Será atualizado após verificação
 		HasReviewComments:     false, // Será atualizado após verificação
+		HasReviews:            false, // Será atualizado após verificação
+		HasApprovedReviews:    false, // Será atualizado após verificação
 		CommentsChecked:       false, // Inicialmente não verificado
 		IssueCommentsChecked:  false, // Inicialmente não verificado
 		ReviewCommentsChecked: false, // Inicialmente não verificado
+		ReviewsChecked:        false, // Inicialmente não verificado
 		CachedAt:              time.Now(),
+	}
+}
+
+// FromGithubReview converte um github.PullRequestReview para ReviewData
+func FromGithubReview(review *github.PullRequestReview, repoOwner, repoName string, prNumber int) *ReviewData {
+	var submittedAt time.Time
+	if review.SubmittedAt != nil {
+		submittedAt = review.SubmittedAt.Time
+	}
+
+	return &ReviewData{
+		RepoOwner:   repoOwner,
+		RepoName:    repoName,
+		PRNumber:    prNumber,
+		ReviewID:    review.GetID(),
+		Username:    review.User.GetLogin(),
+		State:       review.GetState(),
+		Body:        review.GetBody(),
+		SubmittedAt: submittedAt,
+		CachedAt:    time.Now(),
 	}
 }
