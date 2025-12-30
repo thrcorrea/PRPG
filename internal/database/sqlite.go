@@ -111,6 +111,7 @@ func (db *sqliteDatabase) createTables() error {
 		pr_number INTEGER NOT NULL,
 		title TEXT NOT NULL,
 		username TEXT NOT NULL,
+		created_at DATETIME NOT NULL,
 		merged_at DATETIME NOT NULL,
 		additions INTEGER DEFAULT 0,
 		deletions INTEGER DEFAULT 0,
@@ -220,7 +221,7 @@ func (db *sqliteDatabase) createTables() error {
 // GetPR busca um PR pelo repositório e número
 func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRData, error) {
 	query := `
-		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at,
+		SELECT id, repo_owner, repo_name, pr_number, title, username, created_at, merged_at,
 		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
 		FROM prs 
@@ -236,6 +237,7 @@ func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRDa
 		&pr.PRNumber,
 		&pr.Title,
 		&pr.Username,
+		&pr.CreatedAt,
 		&pr.MergedAt,
 		&pr.HasComments,
 		&pr.HasIssueComments,
@@ -263,10 +265,10 @@ func (db *sqliteDatabase) GetPR(repoOwner, repoName string, prNumber int) (*PRDa
 func (db *sqliteDatabase) SavePR(pr *PRData) error {
 	query := `
 		INSERT OR REPLACE INTO prs 
-		(repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
+		(repo_owner, repo_name, pr_number, title, username, created_at, merged_at, additions, deletions, changed_files,
 		 has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		 comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := db.db.Exec(query,
 		pr.RepoOwner,
@@ -274,6 +276,7 @@ func (db *sqliteDatabase) SavePR(pr *PRData) error {
 		pr.PRNumber,
 		pr.Title,
 		pr.Username,
+		pr.CreatedAt,
 		pr.MergedAt,
 		pr.Additions,
 		pr.Deletions,
@@ -880,7 +883,7 @@ func (db *sqliteDatabase) GetReviewsByPR(repoOwner, repoName string, prNumber in
 // GetAllPRs busca todos os PRs salvos no banco
 func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
 	query := `
-		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
+		SELECT id, repo_owner, repo_name, pr_number, title, username, created_at, merged_at, additions, deletions, changed_files,
 		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
 		FROM prs 
@@ -902,6 +905,7 @@ func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
 			&pr.PRNumber,
 			&pr.Title,
 			&pr.Username,
+			&pr.CreatedAt,
 			&pr.MergedAt,
 			&pr.Additions,
 			&pr.Deletions,
@@ -933,7 +937,7 @@ func (db *sqliteDatabase) GetAllPRs() ([]*PRData, error) {
 // GetAllPRsInDateRange busca PRs em um intervalo de datas específico
 func (db *sqliteDatabase) GetAllPRsInDateRange(startDate, endDate time.Time) ([]*PRData, error) {
 	query := `
-		SELECT id, repo_owner, repo_name, pr_number, title, username, merged_at, additions, deletions, changed_files,
+		SELECT id, repo_owner, repo_name, pr_number, title, username, created_at, merged_at, additions, deletions, changed_files,
 		       has_comments, has_issue_comments, has_review_comments, has_reviews, has_approved_reviews,
 		       comments_checked, issue_comments_checked, review_comments_checked, reviews_checked, cached_at
 		FROM prs 
@@ -956,6 +960,7 @@ func (db *sqliteDatabase) GetAllPRsInDateRange(startDate, endDate time.Time) ([]
 			&pr.PRNumber,
 			&pr.Title,
 			&pr.Username,
+			&pr.CreatedAt,
 			&pr.MergedAt,
 			&pr.Additions,
 			&pr.Deletions,

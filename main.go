@@ -52,6 +52,29 @@ type WeeklyData struct {
 	CommentWinner         string                    // vencedor da semana por comentários
 	UserWeightedComments  map[string]float64        // pontuação ponderada por usuário na semana
 	WeightedCommentWinner string                    // vencedor da semana por pontuação ponderada
+	MergeTimes            []time.Duration           // tempos entre criação e merge dos PRs da semana
+	P90MergeTime          time.Duration             // P90 do tempo de merge da semana
+	MedianMergeTime       time.Duration             // Mediana do tempo de merge dos últimos 30 dias
+	AverageMergeTime      time.Duration             // Média do tempo de merge dos últimos 30 dias
+}
+
+// MonthlyData representa os dados de um mês específico
+type MonthlyData struct {
+	Year                  int
+	Month                 int
+	StartDate             time.Time
+	EndDate               time.Time
+	UserPRs               map[string]int
+	Winner                string
+	RepoData              map[string]map[string]int // repo -> user -> PRs
+	UserComments          map[string]int            // comentários por usuário no mês
+	CommentWinner         string                    // vencedor do mês por comentários
+	UserWeightedComments  map[string]float64        // pontuação ponderada por usuário no mês
+	WeightedCommentWinner string                    // vencedor do mês por pontuação ponderada
+	MergeTimes            []time.Duration           // tempos entre criação e merge dos PRs do mês
+	P90MergeTime          time.Duration             // P90 do tempo de merge do mês
+	MedianMergeTime       time.Duration             // Mediana do tempo de merge dos últimos 30 dias
+	AverageMergeTime      time.Duration             // Média do tempo de merge dos últimos 30 dias
 }
 
 // PRChampion é a estrutura principal da aplicação
@@ -62,7 +85,17 @@ type PRChampion struct {
 	startDate    time.Time
 	endDate      time.Time
 	weeklyData   []WeeklyData
+	monthlyData  []MonthlyData
 	userStats    map[string]*UserStats
+}
+
+// MetricDisplayConfig configura quais métricas exibir e formato
+type MetricDisplayConfig struct {
+	ShowP90     bool
+	ShowMedian  bool
+	ShowAverage bool
+	TimeFormat  string // "hours", "days", "minutes"
+	GroupBy     string // "week", "month"
 }
 
 // NewPRChampion cria uma nova instância do PR Champion
@@ -80,6 +113,7 @@ func NewPRChampion(token string, repositories []Repository, startDate, endDate t
 		startDate:    startDate,
 		endDate:      endDate,
 		weeklyData:   []WeeklyData{},
+		monthlyData:  []MonthlyData{},
 		userStats:    make(map[string]*UserStats),
 	}, nil
 }
@@ -99,6 +133,7 @@ func NewPRChampionFromDatabase(startDate, endDate time.Time) (*PRChampion, error
 		startDate:    startDate,
 		endDate:      endDate,
 		weeklyData:   []WeeklyData{},
+		monthlyData:  []MonthlyData{},
 		userStats:    make(map[string]*UserStats),
 	}, nil
 }
@@ -149,6 +184,9 @@ func (pc *PRChampion) LoadDataFromDatabase() error {
 	// Processa dados semanais dos PRs
 	pc.processWeeklyData(githubPRs)
 
+	// Também processa dados mensais dos PRs
+	pc.processMonthlyDataFromDatabase(prs)
+
 	// Carrega e processa comentários
 	err = pc.loadCommentsFromDatabase(prs, db)
 	if err != nil {
@@ -178,6 +216,7 @@ func (pc *PRChampion) convertPRDataToGithubPR(prs []*database.PRData) []*github.
 			Number:       &pr.PRNumber,
 			Title:        &pr.Title,
 			User:         &github.User{Login: &pr.Username},
+			CreatedAt:    &github.Timestamp{Time: pr.CreatedAt},
 			MergedAt:     &github.Timestamp{Time: pr.MergedAt},
 			Additions:    &pr.Additions,
 			Deletions:    &pr.Deletions,
@@ -578,6 +617,10 @@ func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string
 				CommentWinner:         commentWinner,
 				UserWeightedComments:  userWeightedComments,
 				WeightedCommentWinner: weightedCommentWinner,
+				MergeTimes:            make([]time.Duration, 0),
+				P90MergeTime:          0,
+				MedianMergeTime:       0,
+				AverageMergeTime:      0,
 			})
 		}
 	}
@@ -593,6 +636,7 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 	// Agrupa PRs por semana
 	weeklyMap := make(map[string]map[string]int)
 	weekStarts := make(map[string]time.Time)
+	weeklyMergeTimes := make(map[string][]time.Duration)
 
 	for _, pr := range prs {
 		// Verifica se o PR deve ser ignorado para gamificação
@@ -611,10 +655,17 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 		if weeklyMap[weekKey] == nil {
 			weeklyMap[weekKey] = make(map[string]int)
 			weekStarts[weekKey] = weekStart
+			weeklyMergeTimes[weekKey] = make([]time.Duration, 0)
 		}
 
 		username := pr.User.GetLogin()
 		weeklyMap[weekKey][username]++
+
+		// Calcula tempo entre criação e merge
+		if pr.CreatedAt != nil && pr.MergedAt != nil {
+			mergeTime := pr.MergedAt.Time.Sub(pr.CreatedAt.Time)
+			weeklyMergeTimes[weekKey] = append(weeklyMergeTimes[weekKey], mergeTime)
+		}
 
 		// Processa estatísticas de código diretamente aqui
 		if pc.userStats[username] == nil {
@@ -645,17 +696,132 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 			}
 		}
 
+		// Calcula P90 considerando todos os PRs dos últimos 30 dias até o fim da semana
+		thirtyDaysAgo := weekEnd.Add(-30 * 24 * time.Hour)
+		var last30DaysMergeTimes []time.Duration
+
+		for _, pr := range prs {
+			// Verifica se o PR deve ser ignorado para gamificação
+			repoOwner := pr.Base.Repo.Owner.GetLogin()
+			repoName := pr.Base.Repo.GetName()
+			prNumber := pr.GetNumber()
+
+			if pc.shouldIgnorePRForGamification(repoOwner, repoName, prNumber) {
+				continue
+			}
+
+			mergedAt := pr.MergedAt.Time
+
+			// Inclui PRs mergeados nos últimos 30 dias até o fim desta semana
+			if mergedAt.After(thirtyDaysAgo) && mergedAt.Before(weekEnd.Add(24*time.Hour)) {
+				if pr.CreatedAt != nil && pr.MergedAt != nil {
+					mergeTime := pr.MergedAt.Time.Sub(pr.CreatedAt.Time)
+					last30DaysMergeTimes = append(last30DaysMergeTimes, mergeTime)
+				}
+			}
+		}
+
+		mergeTimes := weeklyMergeTimes[weekKey]                            // PRs apenas desta semana (para outras estatísticas)
+		p90MergeTime := calculateP90Duration(last30DaysMergeTimes)         // P90 dos últimos 30 dias
+		medianMergeTime := calculateMedianDuration(last30DaysMergeTimes)   // Mediana dos últimos 30 dias
+		averageMergeTime := calculateAverageDuration(last30DaysMergeTimes) // Média dos últimos 30 dias
+
 		pc.weeklyData = append(pc.weeklyData, WeeklyData{
-			StartDate: weekStart,
-			EndDate:   weekEnd,
-			UserPRs:   userPRs,
-			Winner:    winner,
+			StartDate:        weekStart,
+			EndDate:          weekEnd,
+			UserPRs:          userPRs,
+			Winner:           winner,
+			MergeTimes:       mergeTimes,
+			P90MergeTime:     p90MergeTime,
+			MedianMergeTime:  medianMergeTime,
+			AverageMergeTime: averageMergeTime,
 		})
 	}
 
 	// Ordena por data
 	sort.Slice(pc.weeklyData, func(i, j int) bool {
 		return pc.weeklyData[i].StartDate.Before(pc.weeklyData[j].StartDate)
+	})
+}
+
+// processMonthlyDataFromDatabase agrupa dados mensais do banco de dados
+func (pc *PRChampion) processMonthlyDataFromDatabase(prs []*database.PRData) {
+	monthlyPRs := make(map[string]map[string]int)         // monthKey -> user -> PRs
+	monthlyMergeTimes := make(map[string][]time.Duration) // monthKey -> merge times
+
+	// Primeiro, ordena todos os PRs por data de merge
+	sort.Slice(prs, func(i, j int) bool {
+		return prs[i].MergedAt.Before(prs[j].MergedAt)
+	})
+
+	// Agrupa PRs por mês
+	for _, pr := range prs {
+		if pr.MergedAt.IsZero() {
+			continue
+		}
+
+		// Primeiro dia do mês
+		monthStart := time.Date(pr.MergedAt.Year(), pr.MergedAt.Month(), 1, 0, 0, 0, 0, pr.MergedAt.Location())
+		monthKey := monthStart.Format("2006-01")
+
+		if monthlyPRs[monthKey] == nil {
+			monthlyPRs[monthKey] = make(map[string]int)
+		}
+		if monthlyMergeTimes[monthKey] == nil {
+			monthlyMergeTimes[monthKey] = make([]time.Duration, 0)
+		}
+
+		monthlyPRs[monthKey][pr.Author]++
+		monthlyMergeTimes[monthKey] = append(monthlyMergeTimes[monthKey], pr.MergeTime)
+	}
+
+	// Criar dados mensais
+	for monthKey, userPRs := range monthlyPRs {
+		monthStart, _ := time.Parse("2006-01", monthKey)
+		monthEnd := monthStart.AddDate(0, 1, 0).Add(-time.Second)
+
+		// Encontrar vencedor do mês
+		winner := ""
+		maxPRs := 0
+		for user, count := range userPRs {
+			if count > maxPRs {
+				maxPRs = count
+				winner = user
+			}
+		}
+
+		// Calcular métricas dos últimos 30 dias até o final do mês
+		last30DaysStart := monthEnd.Add(-30 * 24 * time.Hour)
+		last30DaysMergeTimes := make([]time.Duration, 0)
+
+		for _, pr := range prs {
+			if !pr.MergedAt.IsZero() && pr.MergedAt.After(last30DaysStart) && !pr.MergedAt.After(monthEnd) {
+				last30DaysMergeTimes = append(last30DaysMergeTimes, pr.MergeTime)
+			}
+		}
+
+		mergeTimes := monthlyMergeTimes[monthKey]                          // PRs apenas deste mês
+		p90MergeTime := calculateP90Duration(last30DaysMergeTimes)         // P90 dos últimos 30 dias
+		medianMergeTime := calculateMedianDuration(last30DaysMergeTimes)   // Mediana dos últimos 30 dias
+		averageMergeTime := calculateAverageDuration(last30DaysMergeTimes) // Média dos últimos 30 dias
+
+		pc.monthlyData = append(pc.monthlyData, MonthlyData{
+			Year:             monthStart.Year(),
+			Month:            int(monthStart.Month()),
+			StartDate:        monthStart,
+			EndDate:          monthEnd,
+			UserPRs:          userPRs,
+			Winner:           winner,
+			MergeTimes:       mergeTimes,
+			P90MergeTime:     p90MergeTime,
+			MedianMergeTime:  medianMergeTime,
+			AverageMergeTime: averageMergeTime,
+		})
+	}
+
+	// Reordena por data
+	sort.Slice(pc.monthlyData, func(i, j int) bool {
+		return pc.monthlyData[i].StartDate.Before(pc.monthlyData[j].StartDate)
 	})
 }
 
@@ -721,6 +887,19 @@ func (pc *PRChampion) calculateUserStats() {
 
 // GenerateReport gera o relatório final
 func (pc *PRChampion) GenerateReport() {
+	// Usar configuração padrão para manter compatibilidade
+	defaultConfig := MetricDisplayConfig{
+		ShowP90:     true,
+		ShowMedian:  true,
+		ShowAverage: true,
+		TimeFormat:  "hours",
+		GroupBy:     "week",
+	}
+	pc.GenerateReportWithConfig(defaultConfig)
+}
+
+// GenerateReportWithConfig gera o relatório com configurações personalizadas
+func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	fmt.Printf("\n🏆 RELATÓRIO PR CHAMPION - %s a %s\n",
 		pc.startDate.Format("02/01/2006"), pc.endDate.Format("02/01/2006"))
 
@@ -759,6 +938,11 @@ func (pc *PRChampion) GenerateReport() {
 				medal := []string{"🥇", "🥈", "🥉"}[i]
 				fmt.Printf("   %s %s: %.1f pontos\n", medal, user.Username, user.WeightedCommentScore)
 			}
+		}
+
+		// P90 do tempo de merge
+		if week.P90MergeTime > 0 {
+			fmt.Printf("⏱️  P90 Tempo Merge (últimos 30 dias): %s\n", formatDuration(week.P90MergeTime))
 		}
 
 		fmt.Println()
@@ -871,6 +1055,9 @@ func (pc *PRChampion) GenerateReport() {
 
 	// Labels mais utilizadas
 	pc.showLabelStatistics()
+
+	// Relatório de velocidade por semana em formato CSV
+	pc.showP90WeeklySummary(config)
 
 	// Estatísticas do cache
 	fmt.Println("📈 ESTATÍSTICAS DO CACHE:")
@@ -1189,7 +1376,131 @@ func (pc *PRChampion) getLabelStatistics(db database.CommentDatabase) ([]LabelSt
 	return stats, nil
 }
 
-// isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários
+// showP90WeeklySummary exibe resumo das métricas por período em formato CSV
+func (pc *PRChampion) showP90WeeklySummary(config MetricDisplayConfig) {
+	groupLabel := "SEMANAL"
+	if config.GroupBy == "month" {
+		groupLabel = "MENSAL"
+	}
+
+	fmt.Printf("📊 RESUMO DE VELOCIDADE %s (CSV):\n", groupLabel)
+	fmt.Println(strings.Repeat("=", 60))
+
+	// Verificar se há dados disponíveis
+	hasData := false
+	if config.GroupBy == "month" {
+		hasData = len(pc.monthlyData) > 0
+	} else {
+		hasData = len(pc.weeklyData) > 0
+	}
+
+	if !hasData {
+		fmt.Printf("   Nenhum dado %s disponível.\n", strings.ToLower(groupLabel))
+		fmt.Println()
+		return
+	}
+
+	// Construir header dinâmico
+	periodLabel := "Semana"
+	if config.GroupBy == "month" {
+		periodLabel = "Mês"
+	}
+
+	header := periodLabel
+	if config.ShowP90 {
+		header += fmt.Sprintf(",p90 (%s)", getTimeUnitLabel(config.TimeFormat))
+	}
+	if config.ShowMedian {
+		header += fmt.Sprintf(",Mediana (%s)", getTimeUnitLabel(config.TimeFormat))
+	}
+	if config.ShowAverage {
+		header += fmt.Sprintf(",Média (%s)", getTimeUnitLabel(config.TimeFormat))
+	}
+	fmt.Println(header)
+
+	if config.GroupBy == "month" {
+		// Exibir dados mensais
+		for _, month := range pc.monthlyData {
+			monthStr := month.StartDate.Format("01/2006")
+
+			// Verificar se há dados para exibir
+			hasData := month.P90MergeTime > 0 || month.MedianMergeTime > 0 || month.AverageMergeTime > 0
+
+			row := monthStr
+			if config.ShowP90 {
+				if hasData {
+					row += "," + formatTime(month.P90MergeTime, config.TimeFormat)
+				} else {
+					row += ",0"
+				}
+			}
+			if config.ShowMedian {
+				if hasData {
+					row += "," + formatTime(month.MedianMergeTime, config.TimeFormat)
+				} else {
+					row += ",0"
+				}
+			}
+			if config.ShowAverage {
+				if hasData {
+					row += "," + formatTime(month.AverageMergeTime, config.TimeFormat)
+				} else {
+					row += ",0"
+				}
+			}
+
+			fmt.Println(row)
+		}
+	} else {
+		// Exibir dados semanais
+		for _, week := range pc.weeklyData {
+			weekEndStr := week.EndDate.Format("02/01/2006")
+
+			// Verificar se há dados para exibir
+			hasData := week.P90MergeTime > 0 || week.MedianMergeTime > 0 || week.AverageMergeTime > 0
+
+			row := weekEndStr
+			if config.ShowP90 {
+				if hasData {
+					row += "," + formatTime(week.P90MergeTime, config.TimeFormat)
+				} else {
+					row += ",0"
+				}
+			}
+			if config.ShowMedian {
+				if hasData {
+					row += "," + formatTime(week.MedianMergeTime, config.TimeFormat)
+				} else {
+					row += ",0"
+				}
+			}
+			if config.ShowAverage {
+				if hasData {
+					row += "," + formatTime(week.AverageMergeTime, config.TimeFormat)
+				} else {
+					row += ",0"
+				}
+			}
+
+			fmt.Println(row)
+		}
+	}
+	fmt.Println()
+}
+
+// getTimeUnitLabel retorna o rótulo da unidade de tempo
+func getTimeUnitLabel(format string) string {
+	switch format {
+	case "days":
+		return "d"
+	case "minutes":
+		return "min"
+	case "hours":
+		fallthrough
+	default:
+		return "h"
+	}
+} // isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários
 func isExcludedUser(username string) bool {
 	excludedUsers := []string{
 		"grupogcb",
@@ -1295,6 +1606,111 @@ func (pc *PRChampion) calculateReviewCommentScore(ctx context.Context, repoOwner
 	}
 
 	return pc.calculateScoreFromReactions(reactions, mergedAt)
+}
+
+// calculateP90Duration calcula o percentil 90 de uma lista de durações
+func calculateP90Duration(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+
+	// Ordena as durações
+	sort.Slice(durations, func(i, j int) bool {
+		return durations[i] < durations[j]
+	})
+
+	// Calcula o índice do P90
+	index := int(float64(len(durations)) * 0.9)
+	if index >= len(durations) {
+		index = len(durations) - 1
+	}
+
+	return durations[index]
+}
+
+// calculateMedianDuration calcula a mediana de uma lista de durações
+func calculateMedianDuration(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+
+	// Ordena as durações
+	sort.Slice(durations, func(i, j int) bool {
+		return durations[i] < durations[j]
+	})
+
+	n := len(durations)
+	if n%2 == 0 {
+		// Par: média dos dois elementos do meio
+		mid1 := durations[n/2-1]
+		mid2 := durations[n/2]
+		return time.Duration((int64(mid1) + int64(mid2)) / 2)
+	} else {
+		// Ímpar: elemento do meio
+		return durations[n/2]
+	}
+}
+
+// calculateAverageDuration calcula a média dos tempos de duração
+func calculateAverageDuration(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+
+	var total time.Duration
+	for _, d := range durations {
+		total += d
+	}
+
+	return total / time.Duration(len(durations))
+}
+
+// formatTime formata duração no formato especificado
+func formatTime(d time.Duration, format string) string {
+	if d == 0 {
+		return "0"
+	}
+
+	switch format {
+	case "days":
+		days := int(d.Hours() / 24)
+		return fmt.Sprintf("%d", days)
+	case "minutes":
+		minutes := int(d.Minutes())
+		return fmt.Sprintf("%d", minutes)
+	case "hours":
+		fallthrough
+	default:
+		hours := int(d.Hours())
+		return fmt.Sprintf("%d", hours)
+	}
+}
+
+// formatDuration formata uma duração de forma legível
+func formatDuration(d time.Duration) string {
+	if d == 0 {
+		return "N/A"
+	}
+
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) % 24
+	minutes := int(d.Minutes()) % 60
+
+	if days > 0 {
+		if hours > 0 {
+			return fmt.Sprintf("%dd %dh", days, hours)
+		}
+		return fmt.Sprintf("%dd", days)
+	}
+
+	if hours > 0 {
+		if minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+
+	return fmt.Sprintf("%dm", minutes)
 }
 
 // getWeekStart retorna o início da semana (segunda-feira)
@@ -1464,6 +1880,13 @@ func init() {
 	reportCmd.Flags().StringP("start", "s", "", "Data de início para filtrar dados (DD/MM/YYYY ou YYYY-MM-DD)")
 	reportCmd.Flags().StringP("end", "e", "", "Data de fim para filtrar dados (DD/MM/YYYY ou YYYY-MM-DD)")
 	reportCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para filtrar dados (alternativa às datas específicas)")
+
+	// Flags para personalizar métricas de velocidade de PR
+	reportCmd.Flags().Bool("show-p90", true, "Exibir métrica P90 no relatório de velocidade")
+	reportCmd.Flags().Bool("show-median", true, "Exibir métrica de mediana no relatório de velocidade")
+	reportCmd.Flags().Bool("show-average", true, "Exibir métrica de média no relatório de velocidade")
+	reportCmd.Flags().StringP("time-format", "f", "hours", "Formato de tempo: hours, days, minutes")
+	reportCmd.Flags().StringP("group-by", "g", "week", "Agrupar dados por: week, month")
 }
 
 // loadDataFromGithub carrega dados da API do GitHub e salva no banco
@@ -1591,6 +2014,33 @@ func generateReportFromDatabase(cmd *cobra.Command) {
 	endDateStr, _ := cmd.Flags().GetString("end")
 	daysBack, _ := cmd.Flags().GetInt("days")
 
+	// Ler configurações de métricas
+	showP90, _ := cmd.Flags().GetBool("show-p90")
+	showMedian, _ := cmd.Flags().GetBool("show-median")
+	showAverage, _ := cmd.Flags().GetBool("show-average")
+	timeFormat, _ := cmd.Flags().GetString("time-format")
+	groupBy, _ := cmd.Flags().GetString("group-by")
+
+	// Validar formato de tempo
+	if timeFormat != "hours" && timeFormat != "days" && timeFormat != "minutes" {
+		fmt.Printf("⚠️  Formato de tempo inválido: %s. Usando 'hours' como padrão.\n", timeFormat)
+		timeFormat = "hours"
+	}
+
+	// Validar agrupamento
+	if groupBy != "week" && groupBy != "month" {
+		fmt.Printf("⚠️  Tipo de agrupamento inválido: %s. Usando 'week' como padrão.\n", groupBy)
+		groupBy = "week"
+	}
+
+	config := MetricDisplayConfig{
+		ShowP90:     showP90,
+		ShowMedian:  showMedian,
+		ShowAverage: showAverage,
+		TimeFormat:  timeFormat,
+		GroupBy:     groupBy,
+	}
+
 	var startDate, endDate time.Time
 	var err error
 
@@ -1632,7 +2082,7 @@ func generateReportFromDatabase(cmd *cobra.Command) {
 		log.Fatalf("❌ Erro ao carregar dados do banco: %v", err)
 	}
 
-	prChampion.GenerateReport()
+	prChampion.GenerateReportWithConfig(config)
 	fmt.Println("✅ Relatório gerado com sucesso!")
 }
 
