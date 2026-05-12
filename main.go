@@ -1341,7 +1341,7 @@ func parseRepositories(repoStrings []string) ([]Repository, error) {
 			branchesStr := strings.TrimSpace(repoStr[colonIndex+1:])
 
 			if branchesStr != "" {
-				branchList := strings.Split(branchesStr, "|")
+				branchList := strings.Split(branchesStr, ",")
 				for _, branch := range branchList {
 					branch = strings.TrimSpace(branch)
 					if branch != "" {
