@@ -144,6 +144,12 @@ release:
 	@echo "✅ Builds de release criados para múltiplas plataformas!"
 	@echo "📋 Certifique-se de que o arquivo .env esteja no mesmo diretório do executável"
 
+# Gera relatório quinzenal interativo
+run-quinzena: build
+	@echo "🏆 Gerando relatório quinzenal..."
+	@read -p "Start (DD/MM/YYYY): " START; read -p "End (DD/MM/YYYY): " END; \
+	./$(BINARY_NAME) quinzena --start "$$START" --end "$$END"
+
 # Build distribuível com .env
 dist: build
 	@echo "📦 Criando pacote distribuível..."

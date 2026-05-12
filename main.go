@@ -1134,6 +1134,22 @@ type LabelStats struct {
 	Color string
 }
 
+// QuinzenaWinner representa um vencedor em uma categoria da quinzena
+type QuinzenaWinner struct {
+	Username string
+	Value    float64 // PRsCount (cast) ou WeightedCommentScore
+	Prize    float64 // GCBits após divisão por empate
+	Position int     // 1, 2 ou 3
+}
+
+// QuinzenaResult armazena os dados calculados para a quinzena
+type QuinzenaResult struct {
+	StartDate      time.Time
+	EndDate        time.Time
+	PRWinners      []QuinzenaWinner
+	CommentWinners []QuinzenaWinner
+}
+
 // getLabelStatistics busca estatísticas das labels do banco
 func (pc *PRChampion) getLabelStatistics(db database.CommentDatabase) ([]LabelStats, error) {
 	// Busca todas as labels dos PRs no período
@@ -1187,6 +1203,178 @@ func (pc *PRChampion) getLabelStatistics(db database.CommentDatabase) ([]LabelSt
 	})
 
 	return stats, nil
+}
+
+// quinzenaMedal retorna o emoji de medalha para uma posição
+func quinzenaMedal(position int) string {
+	switch position {
+	case 1:
+		return "🥇"
+	case 2:
+		return "🥈"
+	case 3:
+		return "🥉"
+	}
+	return ""
+}
+
+// calculateQuinzenaPrizes calcula os vencedores com divisão de prêmio em caso de empate.
+// stats deve estar ordenado; se não estiver, a função ordena internamente via rankBy.
+// Prêmios: 1°=120, 2°=50, 3°=30 GCBits. Empate divide o pool dos slots ocupados.
+func calculateQuinzenaPrizes(stats []*UserStats, rankBy func(*UserStats) float64) []QuinzenaWinner {
+	prizes := [3]float64{120.0, 50.0, 30.0}
+
+	sorted := make([]*UserStats, len(stats))
+	copy(sorted, stats)
+	sort.Slice(sorted, func(i, j int) bool {
+		return rankBy(sorted[i]) > rankBy(sorted[j])
+	})
+
+	var result []QuinzenaWinner
+	currentPosition := 1
+	i := 0
+
+	for i < len(sorted) && currentPosition <= 3 {
+		value := rankBy(sorted[i])
+		if value <= 0 {
+			break
+		}
+
+		// Agrupa todos os empatados com o mesmo valor
+		j := i
+		for j < len(sorted) && rankBy(sorted[j]) == value {
+			j++
+		}
+		tiedGroup := sorted[i:j]
+
+		// Pool = soma dos prêmios dos slots que o grupo ocupa (cap 3)
+		slotsStart := currentPosition - 1
+		slotsEnd := currentPosition - 1 + len(tiedGroup)
+		if slotsEnd > 3 {
+			slotsEnd = 3
+		}
+		pool := 0.0
+		for k := slotsStart; k < slotsEnd; k++ {
+			pool += prizes[k]
+		}
+		prizeEach := pool / float64(len(tiedGroup))
+
+		for _, user := range tiedGroup {
+			result = append(result, QuinzenaWinner{
+				Username: user.Username,
+				Value:    value,
+				Prize:    prizeEach,
+				Position: currentPosition,
+			})
+		}
+
+		currentPosition += len(tiedGroup)
+		i = j
+	}
+
+	return result
+}
+
+// generateQuinzenaAnnouncement gera o texto de anúncio para o Teams
+func (pc *PRChampion) generateQuinzenaAnnouncement(result *QuinzenaResult) string {
+	var sb strings.Builder
+
+	startFmt := result.StartDate.Format("02/01")
+	endFmt := result.EndDate.Format("02/01")
+
+	sb.WriteString(fmt.Sprintf("**🏆 Resultado do Ranking Quinzenal de Code Reviews (%s → %s)**\n\n", startFmt, endFmt))
+	sb.WriteString("Pessoal, temos os resultados da quinzena! 🚀\n\n")
+	sb.WriteString("Premiação:\n")
+	sb.WriteString("🥇 **120 GCBits**\n")
+	sb.WriteString("🥈 **50 GCBits**\n")
+	sb.WriteString("🥉 **30 GCBits**\n\n")
+	sb.WriteString("---\n\n")
+
+	sb.WriteString("### 🔧 Criação de PRs\n\n")
+	for _, w := range result.PRWinners {
+		sb.WriteString(fmt.Sprintf("• %s **%s — %.0f PRs → +%.0f GCBits**\n",
+			quinzenaMedal(w.Position), w.Username, w.Value, w.Prize))
+	}
+	sb.WriteString("\n---\n\n")
+
+	sb.WriteString("### 💬 Qualidade dos Comentários\n\n")
+	for _, w := range result.CommentWinners {
+		sb.WriteString(fmt.Sprintf("• %s **%s — %.1f pontos → +%.0f GCBits**\n",
+			quinzenaMedal(w.Position), w.Username, w.Value, w.Prize))
+	}
+	sb.WriteString("\n---\n\n")
+
+	if len(result.PRWinners) > 0 {
+		sb.WriteString(fmt.Sprintf("🔥 Destaque especial para **%s** pelo volume de entregas nessa quinzena!\n", result.PRWinners[0].Username))
+	}
+	if len(result.CommentWinners) > 0 {
+		if len(result.PRWinners) == 0 || result.CommentWinners[0].Username != result.PRWinners[0].Username {
+			sb.WriteString(fmt.Sprintf("E parabéns a **%s** pelo excelente nível técnico nas revisões 👏\n", result.CommentWinners[0].Username))
+		}
+	}
+	sb.WriteString("\nParabéns aos destaques da quinzena! 🚀\n")
+
+	return sb.String()
+}
+
+// generateQuinzenaIndividualMessages gera as mensagens individuais para o Applause
+func (pc *PRChampion) generateQuinzenaIndividualMessages(result *QuinzenaResult) string {
+	var sb strings.Builder
+
+	for _, w := range result.PRWinners {
+		medal := quinzenaMedal(w.Position)
+		sb.WriteString(fmt.Sprintf("%s **%s — Criação de PRs**\n\n", medal, w.Username))
+		sb.WriteString("Parabéns")
+		switch w.Position {
+		case 1:
+			sb.WriteString(fmt.Sprintf(", %s! 🚀\nVocê foi o grande destaque da quinzena com impressionantes **%.0f PRs entregues**!\n\n", w.Username, w.Value))
+			sb.WriteString("Seu ritmo e consistência tiveram impacto direto na evolução do produto e nas entregas do time.\n\n")
+		case 2:
+			sb.WriteString(fmt.Sprintf(", %s! 👏\nVocê conquistou o segundo lugar com **%.0f PRs entregues** na quinzena.\n\n", w.Username, w.Value))
+			sb.WriteString("Excelente constância e participação nas entregas do time!\n\n")
+		case 3:
+			sb.WriteString(fmt.Sprintf(", %s! 🔥\nVocê garantiu o terceiro lugar com **%.0f PRs entregues**.\n\n", w.Username, w.Value))
+			sb.WriteString("Ótima contribuição para o ritmo e evolução das entregas da squad!\n\n")
+		}
+		sb.WriteString(fmt.Sprintf("🏅 **+%.0f GCBits adicionados ao seu perfil!**\n\n", w.Prize))
+		sb.WriteString("---\n\n")
+	}
+
+	for _, w := range result.CommentWinners {
+		medal := quinzenaMedal(w.Position)
+		sb.WriteString(fmt.Sprintf("%s **%s — Qualidade dos Comentários**\n\n", medal, w.Username))
+		sb.WriteString("Parabéns")
+		switch w.Position {
+		case 1:
+			sb.WriteString(fmt.Sprintf(", %s! 🚀\nVocê liderou o ranking de qualidade com **%.1f pontos**!\n\n", w.Username, w.Value))
+			sb.WriteString("Seus reviews tiveram grande impacto técnico e ajudaram a elevar o padrão das entregas do time.\n\n")
+		case 2:
+			sb.WriteString(fmt.Sprintf(", %s! 👏\nVocê conquistou o segundo lugar com **%.1f pontos** em qualidade.\n\n", w.Username, w.Value))
+			sb.WriteString("Excelente profundidade técnica e consistência nos feedbacks!\n\n")
+		case 3:
+			sb.WriteString(fmt.Sprintf(", %s! 🔥\nVocê garantiu o terceiro lugar com **%.1f pontos** no ranking de qualidade.\n\n", w.Username, w.Value))
+			sb.WriteString("Boa contribuição nas revisões e no suporte à qualidade das entregas!\n\n")
+		}
+		sb.WriteString(fmt.Sprintf("🏅 **+%.0f GCBits adicionados ao seu perfil!**\n\n", w.Prize))
+		sb.WriteString("---\n\n")
+	}
+
+	return sb.String()
+}
+
+// writeQuinzenaOutput salva o relatório quinzenal em arquivo
+func writeQuinzenaOutput(startDate, endDate time.Time, content string) error {
+	if err := os.MkdirAll("./output", 0755); err != nil {
+		return fmt.Errorf("erro ao criar diretório output: %v", err)
+	}
+	filename := fmt.Sprintf("./output/quinzena_%s_%s.txt",
+		startDate.Format("02012006"),
+		endDate.Format("02012006"))
+	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
+		return fmt.Errorf("erro ao salvar arquivo: %v", err)
+	}
+	fmt.Printf("💾 Resultado salvo em: %s\n", filename)
+	return nil
 }
 
 // isExcludedUser verifica se um usuário deve ser excluído da contagem de comentários
@@ -1387,9 +1575,10 @@ var rootCmd = &cobra.Command{
 e gera relatórios com rankings baseados em pontuação semanal.
 
 Comandos disponíveis:
-  • load   - Carrega dados da API do GitHub e salva no banco
-  • report - Gera relatório baseado nos dados salvos no banco
-  • clear  - Limpa completamente o banco de dados
+  • load      - Carrega dados da API do GitHub e salva no banco
+  • report    - Gera relatório baseado nos dados salvos no banco
+  • quinzena  - Gera relatório quinzenal com mensagens de premiação para Teams e Applause
+  • clear     - Limpa completamente o banco de dados
 
 Use 'pr-champion [command] --help' para mais informações sobre cada comando.`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -1434,6 +1623,23 @@ já salvos localmente para gerar os rankings e estatísticas.`,
 	},
 }
 
+// Comando quinzena para gerar relatório quinzenal com mensagens de premiação
+var quinzenaCmd = &cobra.Command{
+	Use:   "quinzena",
+	Short: "Gera relatório quinzenal e mensagens de premiação",
+	Long: `Carrega dados do período quinzenal (ou usa --skip-load para usar dados já no banco),
+calcula os top 3 por PRs e por qualidade de comentários com divisão de prêmio em empate,
+e gera mensagens formatadas para o Teams e para o Applause.
+
+Premiação: 🥇 120 GCBits | 🥈 50 GCBits | 🥉 30 GCBits
+Em caso de empate, o prêmio do(s) slot(s) é dividido igualmente.
+
+Saída salva em: ./output/quinzena_DDMMYYYY_DDMMYYYY.txt`,
+	Run: func(cmd *cobra.Command, args []string) {
+		generateQuinzenaReport(cmd)
+	},
+}
+
 // Comando clear para limpar banco
 var clearCmd = &cobra.Command{
 	Use:   "clear",
@@ -1449,6 +1655,7 @@ func init() {
 	// Adiciona subcomandos
 	rootCmd.AddCommand(loadCmd)
 	rootCmd.AddCommand(reportCmd)
+	rootCmd.AddCommand(quinzenaCmd)
 	rootCmd.AddCommand(clearCmd)
 
 	// Flags do comando load
@@ -1464,6 +1671,12 @@ func init() {
 	reportCmd.Flags().StringP("start", "s", "", "Data de início para filtrar dados (DD/MM/YYYY ou YYYY-MM-DD)")
 	reportCmd.Flags().StringP("end", "e", "", "Data de fim para filtrar dados (DD/MM/YYYY ou YYYY-MM-DD)")
 	reportCmd.Flags().IntP("days", "d", 0, "Número de dias atrás para filtrar dados (alternativa às datas específicas)")
+
+	// Flags do comando quinzena
+	quinzenaCmd.Flags().StringP("start", "s", "", "Data de início da quinzena (DD/MM/YYYY) - obrigatório")
+	quinzenaCmd.Flags().StringP("end", "e", "", "Data de fim da quinzena (DD/MM/YYYY) - obrigatório")
+	quinzenaCmd.Flags().Bool("skip-load", false, "Pula o carregamento do GitHub e usa dados já no banco")
+	quinzenaCmd.Flags().StringP("token", "t", "", "Token GitHub (ou GITHUB_TOKEN env var) - necessário sem --skip-load")
 }
 
 // loadDataFromGithub carrega dados da API do GitHub e salva no banco
@@ -1658,6 +1871,122 @@ func clearDatabase() {
 	}
 
 	fmt.Println("✅ Banco de dados completamente limpo!")
+}
+
+// generateQuinzenaReport gera o relatório quinzenal com mensagens de premiação
+func generateQuinzenaReport(cmd *cobra.Command) {
+	if err := godotenv.Load(); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Printf("⚠️  Aviso: Erro ao carregar .env: %v\n", err)
+		}
+	} else {
+		fmt.Println("✅ Arquivo .env carregado com sucesso")
+	}
+
+	startDateStr, _ := cmd.Flags().GetString("start")
+	endDateStr, _ := cmd.Flags().GetString("end")
+	skipLoad, _ := cmd.Flags().GetBool("skip-load")
+
+	if startDateStr == "" {
+		log.Fatal("❌ --start é obrigatório. Ex: --start 01/05/2026")
+	}
+	if endDateStr == "" {
+		log.Fatal("❌ --end é obrigatório. Ex: --end 15/05/2026")
+	}
+
+	startDate, err := parseDate(startDateStr)
+	if err != nil {
+		log.Fatalf("❌ Erro na data de início: %v", err)
+	}
+	endDate, err := parseDate(endDateStr)
+	if err != nil {
+		log.Fatalf("❌ Erro na data de fim: %v", err)
+	}
+	if endDate.Before(startDate) {
+		log.Fatal("❌ Data de fim deve ser posterior à data de início")
+	}
+
+	fmt.Printf("🏆 Gerando relatório quinzenal (%s → %s)...\n",
+		startDate.Format("02/01/2006"), endDate.Format("02/01/2006"))
+
+	if !skipLoad {
+		token, _ := cmd.Flags().GetString("token")
+		if token == "" {
+			token = os.Getenv("GITHUB_TOKEN")
+			if token == "" {
+				log.Fatal("❌ Token do GitHub é obrigatório. Use --token, --skip-load ou defina GITHUB_TOKEN")
+			}
+		}
+
+		envRepos := os.Getenv("GITHUB_REPOS")
+		if envRepos == "" {
+			log.Fatal("❌ Defina os repositórios via GITHUB_REPOS ou use --skip-load")
+		}
+		repoStrings := strings.Split(envRepos, ",")
+		for i, r := range repoStrings {
+			repoStrings[i] = strings.TrimSpace(r)
+		}
+		repositories, repoErr := parseRepositories(repoStrings)
+		if repoErr != nil {
+			log.Fatalf("❌ Erro ao parsear repositórios: %v", repoErr)
+		}
+
+		fmt.Println("📥 Carregando dados do GitHub...")
+		prLoad, initErr := NewPRChampion(token, repositories, startDate, endDate)
+		if initErr != nil {
+			log.Fatalf("❌ Erro ao inicializar PR Champion: %v", initErr)
+		}
+		defer func() {
+			if prLoad.cachedClient != nil {
+				prLoad.cachedClient.Close()
+			}
+		}()
+		if fetchErr := prLoad.FetchMergedPRs(); fetchErr != nil {
+			log.Fatalf("❌ Erro ao buscar PRs: %v", fetchErr)
+		}
+		fmt.Println("✅ Dados carregados!")
+	}
+
+	prChampion, err := NewPRChampionFromDatabase(startDate, endDate)
+	if err != nil {
+		log.Fatalf("❌ Erro ao inicializar acesso ao banco: %v", err)
+	}
+	defer func() {
+		if prChampion.cachedClient != nil {
+			prChampion.cachedClient.Close()
+		}
+	}()
+
+	if err := prChampion.LoadDataFromDatabase(); err != nil {
+		log.Fatalf("❌ Erro ao carregar dados do banco: %v", err)
+	}
+
+	allUsersByPRs := prChampion.getTopUsersByPRs(len(prChampion.userStats))
+	allUsersByQuality := prChampion.getTopUsersByWeightedCommentScore(len(prChampion.userStats))
+
+	result := &QuinzenaResult{
+		StartDate:      startDate,
+		EndDate:        endDate,
+		PRWinners:      calculateQuinzenaPrizes(allUsersByPRs, func(u *UserStats) float64 { return float64(u.PRsCount) }),
+		CommentWinners: calculateQuinzenaPrizes(allUsersByQuality, func(u *UserStats) float64 { return u.WeightedCommentScore }),
+	}
+
+	announcement := prChampion.generateQuinzenaAnnouncement(result)
+	individualMessages := prChampion.generateQuinzenaIndividualMessages(result)
+
+	separator := strings.Repeat("=", 60)
+	fullOutput := "=== MENSAGEM TEAMS ===\n\n" + announcement +
+		"\n\n=== MENSAGENS INDIVIDUAIS (APPLAUSE) ===\n\n" + individualMessages
+
+	fmt.Println("\n" + separator)
+	fmt.Print(fullOutput)
+	fmt.Println(separator)
+
+	if err := writeQuinzenaOutput(startDate, endDate, fullOutput); err != nil {
+		fmt.Printf("⚠️  Aviso: Não foi possível salvar arquivo: %v\n", err)
+	}
+
+	fmt.Println("✅ Relatório quinzenal gerado com sucesso!")
 }
 
 func main() {
