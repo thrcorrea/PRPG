@@ -608,7 +608,7 @@ func (pc *PRChampion) processWeeklyComments(weeklyComments map[string]map[string
 
 		// Se não encontrou, cria uma nova entrada semanal apenas para comentários
 		if !found {
-			weekEnd := weekStart.Add(6 * 24 * time.Hour)
+			weekEnd := weekStart.Add(13 * 24 * time.Hour)
 			pc.weeklyData = append(pc.weeklyData, WeeklyData{
 				StartDate:             weekStart,
 				EndDate:               weekEnd,
@@ -684,7 +684,7 @@ func (pc *PRChampion) processWeeklyData(prs []*github.PullRequest) {
 	// Converte para slice de WeeklyData
 	for weekKey, userPRs := range weeklyMap {
 		weekStart := weekStarts[weekKey]
-		weekEnd := weekStart.Add(6 * 24 * time.Hour)
+		weekEnd := weekStart.Add(13 * 24 * time.Hour)
 
 		// Encontra o vencedor da semana
 		var winner string
@@ -771,8 +771,9 @@ func (pc *PRChampion) processMonthlyDataFromDatabase(prs []*database.PRData) {
 			monthlyMergeTimes[monthKey] = make([]time.Duration, 0)
 		}
 
-		monthlyPRs[monthKey][pr.Author]++
-		monthlyMergeTimes[monthKey] = append(monthlyMergeTimes[monthKey], pr.MergeTime)
+		monthlyPRs[monthKey][pr.Username]++
+		mergeTime := pr.MergedAt.Sub(pr.CreatedAt)
+		monthlyMergeTimes[monthKey] = append(monthlyMergeTimes[monthKey], mergeTime)
 	}
 
 	// Criar dados mensais
@@ -796,7 +797,8 @@ func (pc *PRChampion) processMonthlyDataFromDatabase(prs []*database.PRData) {
 
 		for _, pr := range prs {
 			if !pr.MergedAt.IsZero() && pr.MergedAt.After(last30DaysStart) && !pr.MergedAt.After(monthEnd) {
-				last30DaysMergeTimes = append(last30DaysMergeTimes, pr.MergeTime)
+				mergeTime := pr.MergedAt.Sub(pr.CreatedAt)
+				last30DaysMergeTimes = append(last30DaysMergeTimes, mergeTime)
 			}
 		}
 
@@ -921,22 +923,28 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 		// Campeão por PRs
 		if week.Winner != "" {
 			fmt.Printf("🥇 Campeão PRs: %s\n", week.Winner)
-			// Top 3 da semana por PRs
-			weekTop := pc.getTopUsersForWeek(week.UserPRs, 3)
+			// Top 5 da semana por PRs
+			weekTop := pc.getTopUsersForWeek(week.UserPRs, 5)
+			wkPos := 1
 			for i, user := range weekTop {
-				medal := []string{"🥇", "🥈", "🥉"}[i]
-				fmt.Printf("   %s %s: %d PRs\n", medal, user.Username, user.PRsCount)
+				if i > 0 && user.PRsCount != weekTop[i-1].PRsCount {
+					wkPos = i + 1
+				}
+				fmt.Printf("   %s %d° %s: %d PRs\n", getMedal(wkPos), wkPos, user.Username, user.PRsCount)
 			}
 		}
 
 		// Campeão por qualidade de comentários (pontuação ponderada)
 		if week.WeightedCommentWinner != "" {
 			fmt.Printf("⭐ Campeão Qualidade: %s\n", week.WeightedCommentWinner)
-			// Top 3 da semana por pontuação ponderada
-			weekTopWeighted := pc.getTopUsersForWeekWeighted(week.UserWeightedComments, 3)
+			// Top 5 da semana por pontuação ponderada
+			weekTopWeighted := pc.getTopUsersForWeekWeighted(week.UserWeightedComments, 5)
+			wkqPos := 1
 			for i, user := range weekTopWeighted {
-				medal := []string{"🥇", "🥈", "🥉"}[i]
-				fmt.Printf("   %s %s: %.1f pontos\n", medal, user.Username, user.WeightedCommentScore)
+				if i > 0 && user.WeightedCommentScore != weekTopWeighted[i-1].WeightedCommentScore {
+					wkqPos = i + 1
+				}
+				fmt.Printf("   %s %d° %s: %.1f pontos\n", getMedal(wkqPos), wkqPos, user.Username, user.WeightedCommentScore)
 			}
 		}
 
@@ -953,23 +961,12 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	fmt.Println(strings.Repeat("=", 60))
 
 	topUsers := pc.getTopUsersByScore(5)
+	scorePos := 1
 	for i, user := range topUsers {
-		position := i + 1
-		medal := ""
-		switch position {
-		case 1:
-			medal = "🥇"
-		case 2:
-			medal = "🥈"
-		case 3:
-			medal = "🥉"
-		case 4:
-			medal = "🏅"
-		case 5:
-			medal = "🎖️"
+		if i > 0 && user.TotalScore != topUsers[i-1].TotalScore {
+			scorePos = i + 1
 		}
-
-		fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+		fmt.Printf("%s %d° lugar: %s\n", getMedal(scorePos), scorePos, user.Username)
 		fmt.Printf("   📊 Pontuação: %d pontos\n", user.TotalScore)
 		fmt.Printf("   🏆 Vitórias semanais: %d\n", user.WeeklyWins)
 		fmt.Printf("   📋 Total de PRs: %d\n\n", user.PRsCount)
@@ -983,23 +980,12 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	if len(topWeightedCommentWeeklyUsers) == 0 {
 		fmt.Println("   Nenhuma vitória semanal por qualidade de comentários foi registrada no período analisado.")
 	} else {
+		wcwPos := 1
 		for i, user := range topWeightedCommentWeeklyUsers {
-			position := i + 1
-			medal := ""
-			switch position {
-			case 1:
-				medal = "🥇"
-			case 2:
-				medal = "🥈"
-			case 3:
-				medal = "🥉"
-			case 4:
-				medal = "🏅"
-			case 5:
-				medal = "🎖️"
+			if i > 0 && user.WeightedCommentWeeklyScore != topWeightedCommentWeeklyUsers[i-1].WeightedCommentWeeklyScore {
+				wcwPos = i + 1
 			}
-
-			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+			fmt.Printf("%s %d° lugar: %s\n", getMedal(wcwPos), wcwPos, user.Username)
 			fmt.Printf("   🏅 Pontuação semanal: %d pontos\n", user.WeightedCommentWeeklyScore)
 			fmt.Printf("   🏆 Vitórias semanais (qualidade): %d\n", user.WeightedCommentWeeklyWins)
 			fmt.Printf("   ⭐ Pontuação total com reações: %.1f pontos\n\n", user.WeightedCommentScore)
@@ -1011,10 +997,12 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	fmt.Println(strings.Repeat("=", 60))
 
 	topByPRs2 := pc.getTopUsersByPRs(5)
+	prsPos := 1
 	for i, user := range topByPRs2 {
-		position := i + 1
-		medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
-		fmt.Printf("%s %d° lugar: %s - %d PRs\n", medal, position, user.Username, user.PRsCount)
+		if i > 0 && user.PRsCount != topByPRs2[i-1].PRsCount {
+			prsPos = i + 1
+		}
+		fmt.Printf("%s %d° lugar: %s - %d PRs\n", getMedal(prsPos), prsPos, user.Username, user.PRsCount)
 	}
 	fmt.Println()
 
@@ -1026,10 +1014,12 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	if len(topByComments) == 0 {
 		fmt.Println("   Nenhum comentário encontrado no período analisado.")
 	} else {
+		commPos := 1
 		for i, user := range topByComments {
-			position := i + 1
-			medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
-			fmt.Printf("%s %d° lugar: %s - %.2f comentários\n", medal, position, user.Username, user.WeightedCommentScore)
+			if i > 0 && user.WeightedCommentScore != topByComments[i-1].WeightedCommentScore {
+				commPos = i + 1
+			}
+			fmt.Printf("%s %d° lugar: %s - %.2f comentários\n", getMedal(commPos), commPos, user.Username, user.WeightedCommentScore)
 		}
 	}
 	fmt.Println()
@@ -1042,11 +1032,16 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	if len(topByCode) == 0 {
 		fmt.Println("   Nenhuma estatística de código encontrada no período analisado.")
 	} else {
+		codePos := 1
 		for i, user := range topByCode {
-			position := i + 1
-			medal := []string{"🥇", "🥈", "🥉", "🏅", "🎖️"}[i]
 			totalLines := user.TotalAdditions + user.TotalDeletions
-			fmt.Printf("%s %d° lugar: %s\n", medal, position, user.Username)
+			if i > 0 {
+				prevLines := topByCode[i-1].TotalAdditions + topByCode[i-1].TotalDeletions
+				if totalLines != prevLines {
+					codePos = i + 1
+				}
+			}
+			fmt.Printf("%s %d° lugar: %s\n", getMedal(codePos), codePos, user.Username)
 			fmt.Printf("   📊 Total: %d linhas (+%d/-%d)\n", totalLines, user.TotalAdditions, user.TotalDeletions)
 			fmt.Printf("   📁 Arquivos modificados: %d\n", user.TotalChangedFiles)
 		}
@@ -1066,6 +1061,22 @@ func (pc *PRChampion) GenerateReportWithConfig(config MetricDisplayConfig) {
 	fmt.Println("📋 Cache de comentários e reações: 7 dias")
 	fmt.Println("🗂️  Local do banco: ./data/comments.db")
 	fmt.Println("💡 Use --clear-database para limpar todo o cache")
+}
+
+// getMedal retorna o emoji de medalha para uma dada posição
+func getMedal(position int) string {
+	switch position {
+	case 1:
+		return "🥇"
+	case 2:
+		return "🥈"
+	case 3:
+		return "🥉"
+	case 4:
+		return "🏅"
+	default:
+		return "🎖️"
+	}
 }
 
 // getTopUsersForWeek retorna os top usuários de uma semana específica
@@ -1715,12 +1726,23 @@ func formatDuration(d time.Duration) string {
 
 // getWeekStart retorna o início da semana (segunda-feira)
 func getWeekStart(t time.Time) time.Time {
+	// Encontra a segunda-feira da semana atual
 	weekday := t.Weekday()
 	if weekday == 0 {
 		weekday = 7 // Domingo = 7
 	}
 	daysBack := int(weekday) - 1
-	return t.Add(-time.Duration(daysBack) * 24 * time.Hour).Truncate(24 * time.Hour)
+	currentMonday := t.Add(-time.Duration(daysBack) * 24 * time.Hour).Truncate(24 * time.Hour)
+
+	// Alinha ao início do período de 2 semanas usando 2006-01-02 como âncora (segunda-feira)
+	referenceMonday := time.Date(2006, 1, 2, 0, 0, 0, 0, t.Location())
+	daysDiff := int(currentMonday.Sub(referenceMonday).Hours() / 24)
+	weeksSinceRef := daysDiff / 7
+	mod := weeksSinceRef % 2
+	if mod < 0 {
+		mod += 2
+	}
+	return currentMonday.AddDate(0, 0, -mod*7)
 }
 
 // parseDate converte string de data no formato DD/MM/YYYY para time.Time
@@ -2055,6 +2077,8 @@ func generateReportFromDatabase(cmd *cobra.Command) {
 			if err != nil {
 				log.Fatalf("❌ Erro na data de início: %v", err)
 			}
+		} else {
+			startDate = time.Now().AddDate(-2, 0, 0)
 		}
 
 		if endDateStr != "" {
@@ -2062,6 +2086,8 @@ func generateReportFromDatabase(cmd *cobra.Command) {
 			if err != nil {
 				log.Fatalf("❌ Erro na data de fim: %v", err)
 			}
+		} else {
+			endDate = time.Now() // Até hoje por padrão
 		}
 	}
 
