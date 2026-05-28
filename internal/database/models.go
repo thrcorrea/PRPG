@@ -55,6 +55,7 @@ type PRData struct {
 	PRNumber              int       `json:"pr_number"`
 	Title                 string    `json:"title"`
 	Username              string    `json:"username"`
+	CreatedAt             time.Time `json:"created_at"`
 	MergedAt              time.Time `json:"merged_at"`
 	HasComments           bool      `json:"has_comments"`            // Se tem comentários (issue ou review)
 	HasIssueComments      bool      `json:"has_issue_comments"`      // Se tem issue comments
@@ -167,6 +168,7 @@ func FromGithubPR(pr *github.PullRequest, repoOwner, repoName string) *PRData {
 		PRNumber:              pr.GetNumber(),
 		Title:                 pr.GetTitle(),
 		Username:              pr.User.GetLogin(),
+		CreatedAt:             pr.CreatedAt.Time,
 		MergedAt:              pr.MergedAt.Time,
 		Additions:             pr.GetAdditions(),
 		Deletions:             pr.GetDeletions(),
